@@ -7,6 +7,8 @@ Produces the 3 exact replicas of Microsoft Access Reports:
 """
 
 import os
+import sys
+import subprocess
 import time
 from datetime import datetime
 from typing import Dict, List, Any, Optional
@@ -658,14 +660,23 @@ class PDFReportGenerator:
         pass
 
     def _launch_browser_safe(self, p):
+        browser_args = [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu"
+        ]
         try:
-            return p.chromium.launch(headless=True)
+            return p.chromium.launch(headless=True, args=browser_args)
         except Exception as e:
-            if "Executable doesn't exist" in str(e) or "playwright install" in str(e):
-                import subprocess
+            err_msg = str(e).lower()
+            if "executable doesn't exist" in err_msg or "playwright install" in err_msg or "browser" in err_msg:
                 print("[PDFReportGenerator] Installing Chromium browser for Playwright...")
-                subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
-                return p.chromium.launch(headless=True)
+                try:
+                    subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+                except Exception as install_err:
+                    print(f"[PDFReportGenerator] Playwright install warning: {install_err}")
+                return p.chromium.launch(headless=True, args=browser_args)
             raise e
 
     def _render_html_to_pdf_bytes(

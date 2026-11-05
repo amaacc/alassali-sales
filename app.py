@@ -33,6 +33,17 @@ import charts
 from charts import PLOTLY_CONFIG
 from security_gate import enforce_security_activation_gate, get_machine_id
 
+@st.cache_resource(show_spinner=False)
+def ensure_playwright_installed():
+    try:
+        import subprocess
+        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], timeout=120, capture_output=True)
+    except Exception as e:
+        print(f"[Startup] Playwright setup warning: {e}")
+    return True
+
+ensure_playwright_installed()
+
 # =============================================================================
 # STREAMLIT CONFIG & RTL STYLING
 # =============================================================================
@@ -487,19 +498,22 @@ with tab_print:
         if gen_pdfs or "pdf_cache" in st.session_state:
             if gen_pdfs:
                 with st.spinner("جاري تصميم وتوليد ملفات الـ PDF الثلاثة بدقة البكسل والسرعة الفائقة..."):
-                    pdf_generator = PDFReportGenerator()
-                    pdf_dict = pdf_generator.generate_all_three_pdfs(detailed_rows, totals_rows, grand_totals, report_date_str)
-                    detailed_bytes = pdf_dict["detailed"]
-                    totals_bytes = pdf_dict["totals"]
-                    color_bytes = pdf_dict["color"]
+                    try:
+                        pdf_generator = PDFReportGenerator()
+                        pdf_dict = pdf_generator.generate_all_three_pdfs(detailed_rows, totals_rows, grand_totals, report_date_str)
+                        detailed_bytes = pdf_dict["detailed"]
+                        totals_bytes = pdf_dict["totals"]
+                        color_bytes = pdf_dict["color"]
 
-                    st.session_state.pdf_cache = {
-                        "detailed": detailed_bytes,
-                        "totals": totals_bytes,
-                        "color": color_bytes,
-                        "date_prefix": file_date_prefix
-                    }
-                    st.success("✅ تم توليد ملفات الـ PDF الثلاثة بنجاح وجاهزة للتنزيل والطباعة!")
+                        st.session_state.pdf_cache = {
+                            "detailed": detailed_bytes,
+                            "totals": totals_bytes,
+                            "color": color_bytes,
+                            "date_prefix": file_date_prefix
+                        }
+                        st.success("✅ تم توليد ملفات الـ PDF الثلاثة بنجاح وجاهزة للتنزيل والطباعة!")
+                    except Exception as e:
+                        st.error(f"❌ تعذر توليد ملفات الـ PDF: {e}")
 
             pdf_cache = st.session_state.get("pdf_cache")
             if pdf_cache:
@@ -784,8 +798,12 @@ with tab_monthly:
             per_pd_name = p_data.get("pdf_filename", "تقرير_المبيعات.pdf")
 
             per_excel_bytes = generate_periodic_excel(p_data)
-            pdf_gen = PDFReportGenerator()
-            per_pdf_bytes = pdf_gen.generate_periodic_pdf(p_data)
+            per_pdf_bytes = None
+            try:
+                pdf_gen = PDFReportGenerator()
+                per_pdf_bytes = pdf_gen.generate_periodic_pdf(p_data)
+            except Exception as e:
+                st.warning(f"⚠️ جاري تجهيز محرك PDF في الخلفية ({e}). يمكنك تنزيل ملف الإكسيل الكامل الآن أدناه.")
 
             st.markdown("##### 📥 خيارات التصدير والطباعة الرسمية:")
             col_pdl1, col_pdl2 = st.columns(2)
@@ -800,14 +818,17 @@ with tab_monthly:
                     key="dl_per_excel"
                 )
             with col_pdl2:
-                st.download_button(
-                    label=f"🖨️ طباعة وتحميل التقرير الرسمي ({per_pd_name})",
-                    data=per_pdf_bytes,
-                    file_name=per_pd_name,
-                    mime="application/pdf",
-                    use_container_width=True,
-                    key="dl_per_pdf"
-                )
+                if per_pdf_bytes:
+                    st.download_button(
+                        label=f"🖨️ طباعة وتحميل التقرير الرسمي ({per_pd_name})",
+                        data=per_pdf_bytes,
+                        file_name=per_pd_name,
+                        mime="application/pdf",
+                        use_container_width=True,
+                        key="dl_per_pdf"
+                    )
+                else:
+                    st.button(f"🖨️ تقرير الـ PDF ({per_pd_name}) قيد التجهيز", disabled=True, use_container_width=True, key="dl_per_pdf_dis")
 
             # Table
             st.markdown("#### 📋 جدول مبيعات المعارض للفترة المحددة:")
@@ -1069,8 +1090,12 @@ with tab_monthly:
             cmp_pd_name = c_data.get("pdf_filename", "تقرير_المقارنة.pdf")
 
             cmp_excel_bytes = generate_comparative_excel(c_data)
-            pdf_gen = PDFReportGenerator()
-            cmp_pdf_bytes = pdf_gen.generate_comparative_pdf(c_data)
+            cmp_pdf_bytes = None
+            try:
+                pdf_gen = PDFReportGenerator()
+                cmp_pdf_bytes = pdf_gen.generate_comparative_pdf(c_data)
+            except Exception as e:
+                st.warning(f"⚠️ جاري تجهيز محرك PDF في الخلفية ({e}). يمكنك تنزيل ملف الإكسيل الكامل الآن أدناه.")
 
             st.markdown("##### 📥 خيارات التصدير والطباعة الرسمية للمقارنة:")
             col_cdl1, col_cdl2 = st.columns(2)
@@ -1085,14 +1110,17 @@ with tab_monthly:
                     key="dl_cmp_excel"
                 )
             with col_cdl2:
-                st.download_button(
-                    label=f"🖨️ طباعة وتحميل تقرير المقارنة الرسمي ({cmp_pd_name})",
-                    data=cmp_pdf_bytes,
-                    file_name=cmp_pd_name,
-                    mime="application/pdf",
-                    use_container_width=True,
-                    key="dl_cmp_pdf"
-                )
+                if cmp_pdf_bytes:
+                    st.download_button(
+                        label=f"🖨️ طباعة وتحميل تقرير المقارنة الرسمي ({cmp_pd_name})",
+                        data=cmp_pdf_bytes,
+                        file_name=cmp_pd_name,
+                        mime="application/pdf",
+                        use_container_width=True,
+                        key="dl_cmp_pdf"
+                    )
+                else:
+                    st.button(f"🖨️ تقرير الـ PDF ({cmp_pd_name}) قيد التجهيز", disabled=True, use_container_width=True, key="dl_cmp_pdf_dis")
 
             # Table
             st.markdown("#### 📋 جدول مقارنة مبيعات المعارض ونسب النمو:")
