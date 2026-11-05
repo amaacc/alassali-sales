@@ -244,21 +244,19 @@ def clean_pg_url(url: str) -> str:
     return url
 
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "daily_sales.db")
-SUPABASE_CLOUD_URL = "postgresql+psycopg2://postgres.ztalhuqyeqdusxmuklmw:Abd%406326653@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres?sslmode=require"
 
 # Support environment variables, .env, and Streamlit Secrets (st.secrets)
 _raw_db_url = os.environ.get("DATABASE_URL")
 if not _raw_db_url:
     try:
         import streamlit as st
-        if hasattr(st, "secrets") and "DATABASE_URL" in st.secrets:
-            _raw_db_url = st.secrets["DATABASE_URL"]
+        if hasattr(st, "secrets"):
+            if "DATABASE_URL" in st.secrets:
+                _raw_db_url = st.secrets["DATABASE_URL"]
+            elif "connections" in st.secrets and "supabase" in st.secrets["connections"]:
+                _raw_db_url = st.secrets["connections"]["supabase"].get("url")
     except Exception:
         pass
-
-# If deployed in cloud (Linux container), default directly to Supabase cloud database
-if not _raw_db_url and sys.platform != "win32":
-    _raw_db_url = SUPABASE_CLOUD_URL
 
 DATABASE_URL = clean_pg_url(_raw_db_url or f"sqlite:///{DEFAULT_DB_PATH}")
 
