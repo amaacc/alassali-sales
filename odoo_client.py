@@ -64,14 +64,22 @@ class OdooClient:
         if get_odoo_credentials:
             try:
                 sec_url, sec_db, sec_user, sec_pwd = get_odoo_credentials()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[OdooClient] get_odoo_credentials warning: {e}")
 
-        self.url = (url or os.environ.get("ODOO_URL", sec_url)).rstrip("/")
-        self.db = db or os.environ.get("ODOO_DB", sec_db)
-        self.username = username or os.environ.get("ODOO_USERNAME", sec_user)
-        self.password = password or os.environ.get("ODOO_PASSWORD", sec_pwd)
-        self.timeout = float(timeout or os.environ.get("ODOO_TIMEOUT", 25.0))
+        st_secrets = {}
+        try:
+            import streamlit as st
+            if hasattr(st, "secrets"):
+                st_secrets = st.secrets
+        except Exception:
+            pass
+
+        self.url = (url or os.environ.get("ODOO_URL") or st_secrets.get("ODOO_URL") or sec_url).rstrip("/")
+        self.db = db or os.environ.get("ODOO_DB") or st_secrets.get("ODOO_DB") or sec_db
+        self.username = username or os.environ.get("ODOO_USERNAME") or st_secrets.get("ODOO_USERNAME") or sec_user
+        self.password = password or os.environ.get("ODOO_PASSWORD") or st_secrets.get("ODOO_PASSWORD") or sec_pwd
+        self.timeout = float(timeout or os.environ.get("ODOO_TIMEOUT") or st_secrets.get("ODOO_TIMEOUT") or 25.0)
         self.uid = None
         self._common = None
         self._models = None
@@ -79,6 +87,7 @@ class OdooClient:
     def connect(self) -> bool:
         """Authenticates with Odoo using XML-RPC with resilient socket timeouts."""
         if not (self.url and self.db and self.username and self.password):
+            print(f"[OdooClient] Missing credentials: url={bool(self.url)}, db={bool(self.db)}, user={bool(self.username)}, pwd={bool(self.password)}")
             return False
         try:
             tr_common = get_xmlrpc_transport(self.url, timeout=self.timeout)
@@ -88,6 +97,7 @@ class OdooClient:
                 tr_models = get_xmlrpc_transport(self.url, timeout=self.timeout)
                 self._models = xmlrpc.client.ServerProxy(f"{self.url}/xmlrpc/2/object", transport=tr_models, allow_none=True)
                 return True
+            print(f"[OdooClient] Authentication failed for {self.username} against {self.url} (db={self.db})")
             return False
         except Exception as e:
             print(f"[OdooClient] Connection failed: {e}")
