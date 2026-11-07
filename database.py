@@ -258,6 +258,14 @@ if not _raw_db_url:
     except Exception:
         pass
 
+# Fallback: Securely decrypted Supabase Cloud Database URL (resilient on Streamlit Cloud & local)
+if not _raw_db_url:
+    try:
+        from security import get_database_credentials
+        _raw_db_url = get_database_credentials()
+    except Exception as e:
+        print(f"[Database] Decryption fallback warning: {e}")
+
 DATABASE_URL = clean_pg_url(_raw_db_url or f"sqlite:///{DEFAULT_DB_PATH}")
 
 is_cloud_db = not ("sqlite" in DATABASE_URL.lower())

@@ -67,19 +67,20 @@ class OdooClient:
             except Exception as e:
                 print(f"[OdooClient] get_odoo_credentials warning: {e}")
 
-        st_secrets = {}
-        try:
-            import streamlit as st
-            if hasattr(st, "secrets"):
-                st_secrets = st.secrets
-        except Exception:
-            pass
+        def _get_st_secret(k: str):
+            try:
+                import streamlit as st
+                if hasattr(st, "secrets") and k in st.secrets:
+                    return st.secrets[k]
+            except Exception:
+                pass
+            return None
 
-        self.url = (url or os.environ.get("ODOO_URL") or st_secrets.get("ODOO_URL") or sec_url).rstrip("/")
-        self.db = db or os.environ.get("ODOO_DB") or st_secrets.get("ODOO_DB") or sec_db
-        self.username = username or os.environ.get("ODOO_USERNAME") or st_secrets.get("ODOO_USERNAME") or sec_user
-        self.password = password or os.environ.get("ODOO_PASSWORD") or st_secrets.get("ODOO_PASSWORD") or sec_pwd
-        self.timeout = float(timeout or os.environ.get("ODOO_TIMEOUT") or st_secrets.get("ODOO_TIMEOUT") or 25.0)
+        self.url = (url or os.environ.get("ODOO_URL") or _get_st_secret("ODOO_URL") or sec_url).rstrip("/")
+        self.db = db or os.environ.get("ODOO_DB") or _get_st_secret("ODOO_DB") or sec_db
+        self.username = username or os.environ.get("ODOO_USERNAME") or _get_st_secret("ODOO_USERNAME") or sec_user
+        self.password = password or os.environ.get("ODOO_PASSWORD") or _get_st_secret("ODOO_PASSWORD") or sec_pwd
+        self.timeout = float(timeout or os.environ.get("ODOO_TIMEOUT") or _get_st_secret("ODOO_TIMEOUT") or 25.0)
         self.uid = None
         self._common = None
         self._models = None

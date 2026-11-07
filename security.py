@@ -13,6 +13,10 @@ _ENC_BLOB = b"gAAAAABqlWmgdEcjCgIilioEACQmA37zJOdYety5w6H2Q9g1ChYcK8TFY7P3rXxExp
 _FALLBACK_KEY = b"AlAssali2026SecureOdooXmlRpcKey"
 _FALLBACK_BLOB = b"KRg1AwBbQ0ZQUV9ZPFdTRUJILggOHDkBBTEfTSQBFi5CIhweHRAVUFFfWTxXU0VCSC4IDhw5AQUxH047FxYlGSIHGg4CRAMIAAdkUlFMDhkzBQ0LLQEAMxhNICUYLQ0yABINBUdcVUZKLxlUFEJdeQFfCjlfCjBBVy0BG3APdRJBUVteBFIBUmRcWhRBU3tRWQs7"
 
+# Encrypted Database Payload (Supabase Cloud PostgreSQL)
+_ENC_DB_BLOB = b"gAAAAABq7uJFwTn2fvFe8moH_G1c56_fwljUPh3ukAhxTXZYH_7fE9V7o27ZavA9CEQmA7ZJVttwonzvSZkoIen92SlvYq7EIRLRA41lXEPXDFxlaZob-o2JWHz8wjQJtkymtIaL1QGw6L3NqfgMxvJZ_BA7zQpLTFdwO0iQn67HGXFZ-jRdvBDx4rjvLrtmRIWaFa-vw8GoEae32uFXspioyNEQmXd_l62hTePLYUV6zN8qG9j1vl5HEpR0RqiUXz397D4bF6qj"
+_FALLBACK_DB_BLOB = b"MQMyBxQTCRpDXBlGIBwAGgICfV5AQCgCHyYXES4WVzsYIB8bFB0QV0FWQyAdDgAZCSITVS46CUlmQFV4V093WXIzEhYfRAIdU0Z+CwwHBg0qBRwbdVxCIh8MJwALbx80AxIDDRpXHlFZPl9WQUFXYBQAHCwKHjcDXDgWFSwDJRZOEwkYR1lAUw=="
+
 def get_odoo_credentials():
     """
     Decrypts and returns the Odoo API credentials securely in memory.
@@ -39,6 +43,30 @@ def get_odoo_credentials():
     except Exception as e:
         raise RuntimeError("Security verification failed: Unable to decode credentials.") from e
 
+def get_database_credentials():
+    """
+    Decrypts and returns the Supabase Cloud PostgreSQL database URL securely in memory.
+    Credentials are never written to disk or shown in plain text.
+    """
+    # 1. Primary: Fernet decryption if cryptography is installed
+    try:
+        from cryptography.fernet import Fernet
+        combined_key = _K_PART1 + _K_PART2 + _K_PART3
+        cipher = Fernet(combined_key)
+        decrypted_bytes = cipher.decrypt(_ENC_DB_BLOB)
+        return decrypted_bytes.decode('utf-8')
+    except Exception:
+        pass
+
+    # 2. Resilient Pure-Python Fallback
+    try:
+        raw_bytes = base64.b64decode(_FALLBACK_DB_BLOB)
+        return bytes([b ^ _FALLBACK_KEY[i % len(_FALLBACK_KEY)] for i, b in enumerate(raw_bytes)]).decode('utf-8')
+    except Exception as e:
+        raise RuntimeError("Security verification failed: Unable to decode database credentials.") from e
+
 if __name__ == "__main__":
     url, db, user, pwd = get_odoo_credentials()
-    print("Credentials verified successfully:", url, db, user, "Password length:", len(pwd))
+    print("Odoo verified:", url, db, user, "Password length:", len(pwd))
+    db_url = get_database_credentials()
+    print("Database verified:", "postgres" in db_url)
