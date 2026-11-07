@@ -11,3 +11,9 @@ libxfixes3
 libxrandr2
 libgbm1
 libasound2
+fontconfig
+fonts-dejavu-core
+fonts-freefont-ttf
+fonts-noto-core
+fonts-noto-cjk
+fonts-liberation

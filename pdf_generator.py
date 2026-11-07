@@ -17,6 +17,8 @@ from playwright.sync_api import sync_playwright
 
 # Common CSS styling for all 3 reports matching Microsoft Access design
 COMMON_CSS = """
+@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&display=swap');
+
 @page {
     size: A4 landscape;
     margin: 8mm 10mm 10mm 10mm;
@@ -30,7 +32,7 @@ COMMON_CSS = """
 
 body {
     direction: rtl;
-    font-family: 'Calibri', 'Segoe UI', 'Cairo', Tahoma, sans-serif;
+    font-family: 'Cairo', 'Segoe UI', 'DejaVu Sans', 'Noto Sans Arabic', Tahoma, sans-serif;
     font-size: 10pt;
     color: #000000;
     margin: 0;
@@ -689,12 +691,21 @@ class PDFReportGenerator:
             browser = self._launch_browser_safe(p)
             page = browser.new_page()
             page.set_content(html_content, wait_until="load")
+            try:
+                page.wait_for_load_state("networkidle", timeout=3000)
+            except Exception:
+                pass
+            try:
+                page.evaluate("document.fonts.ready")
+            except Exception:
+                pass
             pdf_bytes = page.pdf(
                 format="A4",
                 landscape=landscape,
                 print_background=True,
                 margin={"top": "8mm", "bottom": "10mm", "left": "10mm", "right": "10mm"}
             )
+            page.close()
             browser.close()
             return pdf_bytes
 
@@ -737,6 +748,14 @@ class PDFReportGenerator:
             # 1. Detailed Report (Landscape)
             page_det = browser.new_page()
             page_det.set_content(html_detailed, wait_until="load")
+            try:
+                page_det.wait_for_load_state("networkidle", timeout=3000)
+            except Exception:
+                pass
+            try:
+                page_det.evaluate("document.fonts.ready")
+            except Exception:
+                pass
             b_detailed = page_det.pdf(
                 format="A4", landscape=True, print_background=True, margin=margin_landscape
             )
@@ -745,6 +764,14 @@ class PDFReportGenerator:
             # 2. Totals Report (Portrait)
             page_tot = browser.new_page()
             page_tot.set_content(html_totals, wait_until="load")
+            try:
+                page_tot.wait_for_load_state("networkidle", timeout=3000)
+            except Exception:
+                pass
+            try:
+                page_tot.evaluate("document.fonts.ready")
+            except Exception:
+                pass
             b_totals = page_tot.pdf(
                 format="A4", landscape=False, print_background=True, margin=margin_portrait
             )
@@ -753,6 +780,14 @@ class PDFReportGenerator:
             # 3. Control & Audit Color Report (Landscape)
             page_col = browser.new_page()
             page_col.set_content(html_color, wait_until="load")
+            try:
+                page_col.wait_for_load_state("networkidle", timeout=3000)
+            except Exception:
+                pass
+            try:
+                page_col.evaluate("document.fonts.ready")
+            except Exception:
+                pass
             b_color = page_col.pdf(
                 format="A4", landscape=True, print_background=True, margin=margin_landscape
             )
