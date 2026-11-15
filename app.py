@@ -9,7 +9,7 @@ import os
 import sys
 import io
 import time
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from calendar import monthrange
 import pandas as pd
 import streamlit as st
@@ -25,10 +25,12 @@ from database import (
 )
 from processor import (
     SalesDataProcessor, parse_date_value, OldClosingsFileUploadedError,
-    generate_monthly_excel, generate_periodic_excel, generate_comparative_excel
+    generate_monthly_excel, generate_periodic_excel, generate_comparative_excel,
+    generate_multidim_excel, generate_showroom_matrix_excel, generate_pareto_excel
 )
 from pdf_generator import PDFReportGenerator
 from odoo_client import OdooClient
+from security import verify_dailysales_credentials
 import charts
 from charts import PLOTLY_CONFIG
 from security_gate import enforce_security_activation_gate, get_machine_id
@@ -129,20 +131,12 @@ enforce_security_activation_gate()
 init_db()
 
 # =============================================================================
-# 2. USER AUTHENTICATION GATE (SECOND LINE OF DEFENSE)
+# 2. USER AUTHENTICATION GATE (SECOND LINE OF DEFENSE - ROLE BASED)
 # =============================================================================
-APP_PASSWORD = os.environ.get("APP_PASSWORD")
-if not APP_PASSWORD:
-    try:
-        if hasattr(st, "secrets") and "APP_PASSWORD" in st.secrets:
-            APP_PASSWORD = st.secrets["APP_PASSWORD"]
-    except Exception:
-        pass
-APP_PASSWORD = APP_PASSWORD or "assali2026"
-
 def check_password():
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
+        st.session_state.user_role = None
 
     if st.session_state.authenticated:
         return True
@@ -153,7 +147,7 @@ def check_password():
         st.write("")
         st.markdown(
             """
-            <div style="text-align: center; padding: 25px; background: white; border-radius: 12px; border: 1px solid #CBD5E1;">
+            <div style="text-align: center; padding: 25px; background: white; border-radius: 12px; border: 1px solid #CBD5E1; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);">
                 <h2 style="color: #1E3A8A; margin-bottom: 5px;">🏢 شركة العسلي للتجارة</h2>
                 <h4 style="color: #475569; margin-top: 0;">نظام مراقبة وإصدار تقارير مبيعات المعارض اليومي</h4>
                 <p style="color: #64748B; font-size: 10pt;">النسخة السحابية المعتمدة (بديل Microsoft Access)</p>
@@ -164,8 +158,10 @@ def check_password():
         st.write("")
         pwd = st.text_input("🔐 كلمة المرور للوصول إلى النظام:", type="password")
         if st.button("تسجيل الدخول", use_container_width=True, type="primary"):
-            if pwd == APP_PASSWORD:
+            role = verify_dailysales_credentials(pwd)
+            if role:
                 st.session_state.authenticated = True
+                st.session_state.user_role = role
                 st.rerun()
             else:
                 st.error("❌ كلمة المرور غير صحيحة، يرجى المحاولة مرة أخرى.")
@@ -173,6 +169,8 @@ def check_password():
 
 if not check_password():
     st.stop()
+
+is_viewer = (st.session_state.get("user_role") == "viewer")
 
 @st.cache_data(ttl=60)
 def get_cached_system_stats():
@@ -212,22 +210,71 @@ with st.sidebar:
     st.write(f"• الدفعات المؤرشفة: **{batch_count}** دفعة")
 
     st.markdown("---")
+    if is_viewer:
+        st.markdown(
+            """
+            <div style="background: #1E293B; color: white; padding: 10px; border-radius: 8px; text-align: center; margin-bottom: 12px; border: 1px solid #334155;">
+                <span style="font-size: 14pt;">👁️</span><br/>
+                <b style="color: #60A5FA;">مستخدم التقارير والمقارنات</b><br/>
+                <span style="font-size: 8.5pt; color: #94A3B8;">صلاحية قراءة التقارير والمقارنات فقط</span>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    else:
+        st.markdown(
+            """
+            <div style="background: #134E4A; color: white; padding: 10px; border-radius: 8px; text-align: center; margin-bottom: 12px; border: 1px solid #115E59;">
+                <span style="font-size: 14pt;">👑</span><br/>
+                <b style="color: #2DD4BF;">المستخدم الحالي (محرر)</b><br/>
+                <span style="font-size: 8.5pt; color: #99F6E4;">كامل الصلاحيات (إدخال وإقفال وتقارير)</span>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
     if st.button("🚪 تسجيل الخروج", use_container_width=True):
         st.session_state.authenticated = False
+        st.session_state.user_role = None
         st.rerun()
 
 # =============================================================================
 # MAIN APP TABS
 # =============================================================================
-st.title("📊 نظام مراقبة وإصدار تقارير مبيعات المعارض اليومي")
-
-tab_radar, tab_data, tab_print, tab_monthly, tab_archive = st.tabs([
-    "🛰️ الرادار الصباحي الذكي (Morning Radar)",
-    "🛒 جلب بيانات المبيعات والمعاينة (Sales Data)",
-    "📄 طباعة التقارير اليومية والاعتماد (Daily Reports)",
-    "📊 التقارير الدورية والمقارنات (Periodic & Comparative Reports)",
-    "🗄️ الأرشيف، الإعدادات والتراجع (Archive & Settings)"
-])
+if not is_viewer:
+    st.title("📊 نظام مراقبة وإصدار تقارير مبيعات المعارض اليومي")
+    tab_radar, tab_data, tab_print, tab_monthly, tab_archive = st.tabs([
+        "🛰️ الرادار الصباحي الذكي (Morning Radar)",
+        "🛒 جلب بيانات المبيعات والمعاينة (Sales Data)",
+        "📄 طباعة التقارير اليومية والاعتماد (Daily Reports)",
+        "📊 التقارير الدورية والمقارنات (Periodic & Comparative Reports)",
+        "🗄️ الأرشيف، الإعدادات والتراجع (Archive & Settings)"
+    ])
+else:
+    st.title("📊 مركز التقارير المالية والتحليلية المقارنة")
+    st.markdown(
+        """
+        <div style="background: linear-gradient(135deg, #1E3A8A, #0D9488); color: white; padding: 14px 20px; border-radius: 10px; margin-bottom: 18px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                    <h3 style="margin: 0; color: #FFFFFF;">📊 بوابة التقارير المالية والتحليلية المقارنة</h3>
+                    <p style="margin: 4px 0 0 0; color: #E0E7FF; font-size: 10pt;">
+                        تم تسجيل الدخول بصلاحية استعراض التقارير الدورية، المقارنات، مصفوفة الموردين، وتحليلات باريتو.
+                    </p>
+                </div>
+                <div style="background: rgba(255,255,255,0.2); padding: 5px 12px; border-radius: 16px; font-weight: bold; font-size: 10.5pt;">
+                    👁️ وضع القراءة فقط
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+    tab_monthly = st.container()
+    tab_radar = None
+    tab_data = None
+    tab_print = None
+    tab_archive = None
 
 # Initialize session state objects
 if "raw_records" not in st.session_state:
@@ -240,368 +287,402 @@ if "active_date_str" not in st.session_state:
 # =============================================================================
 # TAB 1: SMART MORNING RADAR
 # =============================================================================
-with tab_radar:
-    st.subheader("🛰️ الرادار الصباحي الذكي لفحص جلسات نقاط البيع (Odoo POS Radar)")
-    st.info(
-        "يقوم الرادار بفحص جلسات أودو لحظياً، وتحديد المعارض المتأخرة في الإقفال، والتمييز الذكي بين الجلسات "
-        "الرئيسية الجاهزة للطباعة والجلسات الفرعية الشهرية المسموح ببقائها حتى نهاية الشهر."
-    )
-
-    col1, col2, col3 = st.columns([1.5, 1.5, 2])
-    with col1:
-        radar_date = st.date_input("تاريخ يوم التقرير المستهدف:", value=date.today())
-        target_date_str = radar_date.strftime("%Y-%m-%d")
-    with col2:
-        allow_secondary = st.checkbox("السماح ببقاء الجلسات الفرعية الشهرية مفتوحة", value=True)
-    with col3:
-        st.write("")
-        st.write("")
-        btn_scan = st.button("🔍 مسح جلسات نقاط البيع الآن", type="primary", use_container_width=True)
-
-    if btn_scan or "radar_cache" in st.session_state:
-        if btn_scan:
-            with st.spinner("جاري الاتصال بسيرفر أودو وفحص حالة جلسات نقاط البيع..."):
-                try:
-                    db = SessionLocal()
-                    proc = SalesDataProcessor(db)
-                    client = OdooClient()
-                    radar_result = client.scan_morning_radar(target_date_str, allow_secondary_monthly=allow_secondary)
-                    st.session_state.radar_cache = radar_result
-                    st.session_state.active_date_str = target_date_str
-                except Exception as e:
-                    st.error(f"❌ خطأ أثناء الاتصال بأودو: {e}")
-                finally:
-                    db.close()
-
-        radar_data = st.session_state.get("radar_cache")
-        if radar_data:
-            stats = radar_data["stats"]
-
-            # KPI Summary Row
-            r_col1, r_col2, r_col3, r_col4 = st.columns(4)
-            with r_col1:
-                st.metric("إجمالي نقاط البيع النشطة", stats["total_pos_scanned"])
-            with r_col2:
-                st.metric("الجلسات المقفلة الجاهزة", stats["closed_ready_count"])
-            with r_col3:
-                st.metric("جلسات فرعية مسموحة", stats["allowed_secondary_count"])
-            with r_col4:
-                st.metric("معارض متأخرة في الإقفال", stats["late_count"], delta=f"-{stats['late_count']}" if stats["late_count"] > 0 else "جاهز", delta_color="inverse")
-
-            # Readiness Banner
-            if radar_data["ready_for_daily_report"]:
-                st.markdown(
-                    """
-                    <div class="alert-box alert-green">
-                        ✅ <b>كافة المعارض مقفلة وجاهزة لإصدار التقرير اليومي!</b><br/>
-                        يمكنك الانتقال فوراً إلى تبويب <b>(جلب بيانات المبيعات والمعاينة)</b> لتحميل البيانات والطباعة.
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-            else:
-                st.markdown(
-                    f"""
-                    <div class="alert-box alert-red">
-                        ⚠️ <b>تنبيه: يوجد عدد ({stats['late_count']}) معرضاً متأخراً في الإقفال لم تقفل جلساتهم حتى الآن:</b><br/>
-                        يُرجى التواصل مع مدراء المعارض أدناه لإقفال الصندوق، أو المتابعة إذا كانت هناك استثناءات.
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-
-            # Details
-            if radar_data["late_showrooms"]:
-                st.markdown("#### ⏳ قائمة المعارض المتأخرة:")
-                late_df = pd.DataFrame(radar_data["late_showrooms"])[["pos_name", "session_name", "opened_by", "opened_at", "status_text"]]
-                late_df.columns = ["نقطة البيع", "رقم الجلسة", "الكاشير / المدير", "تاريخ ووقت الفتح", "الحالة"]
-                st.dataframe(late_df, use_container_width=True)
-
-            if radar_data["allowed_secondary_sessions"]:
-                with st.expander(f"ℹ️ الجلسات الفرعية الشهرية المسموح ببقائها ({len(radar_data['allowed_secondary_sessions'])} جلسة)"):
-                    sec_df = pd.DataFrame(radar_data["allowed_secondary_sessions"])[["pos_name", "session_name", "opened_at", "status_text"]]
-                    sec_df.columns = ["نقطة البيع", "رقم الجلسة", "تاريخ الفتح", "البيان"]
-                    st.dataframe(sec_df, use_container_width=True)
-
-# =============================================================================
-# TAB 2: SALES DATA FETCHING & REVIEW
-# =============================================================================
-with tab_data:
-    st.subheader("🛒 جلب بيانات المبيعات والمعاينة والتدقيق (Data Intake & Audit)")
-    
-    radar_data = st.session_state.get("radar_cache")
-    if radar_data and radar_data.get("late_showrooms"):
-        st.markdown(
-            f"""
-            <div class="alert-box alert-red" style="margin-bottom: 15px;">
-                <strong>⚠️ تنبيه تحذيري من الرادار الصباحي:</strong> هناك {len(radar_data['late_showrooms'])} معارض لم تغلق جلساتها الرئيسية، وقد لا تظهر مبيعاتها في التقرير إلا بعد إقفالها:<br/>
-                {'<br/>'.join(f"• <b>{x['pos_name']}</b>: {x['status_text']}" for x in radar_data['late_showrooms'])}
-            </div>
-            """,
-            unsafe_allow_html=True
+if not is_viewer:
+    with tab_radar:
+        st.subheader("🛰️ الرادار الصباحي الذكي لفحص جلسات نقاط البيع (Odoo POS Radar)")
+        st.info(
+            "يقوم الرادار بفحص جلسات أودو لحظياً، وتحديد المعارض المتأخرة في الإقفال، والتمييز الذكي بين الجلسات "
+            "الرئيسية الجاهزة للطباعة والجلسات الفرعية الشهرية المسموح ببقائها حتى نهاية الشهر."
         )
-
-    # Fetch Controls
-    c_btn1, c_btn2, c_date = st.columns([2, 2, 2])
-    with c_date:
-        fetch_date = st.date_input("تاريخ المبيعات المطلوبة:", value=date.today())
-        fetch_date_str = fetch_date.strftime("%Y-%m-%d")
-
-    db = SessionLocal()
-    processor = SalesDataProcessor(db)
-
-    with c_btn1:
-        st.write("")
-        st.write("")
-        if st.button("⚡ جلب مباشر وسريع من أودو (Odoo XML-RPC)", type="primary", use_container_width=True):
-            with st.spinner("جاري جلب إقفالات نقاط البيع من سيرفر أودو مباشرة..."):
-                try:
-                    client = OdooClient()
-                    records = client.fetch_daily_pos_records(fetch_date_str, processor.resolver)
-                    st.session_state.raw_records = records
-                    st.session_state.active_date_str = fetch_date_str
-                    st.session_state.pdf_cache = None
-                    st.success(f"✅ تم بنجاح جلب {len(records)} جلسة من أودو.")
-                except Exception as e:
-                    st.error(f"❌ خطأ أثناء الاتصال بأودو: {e}")
-
-    with c_btn2:
-        st.write("")
-        st.write("")
-        excel_file = st.file_uploader("أو رفع ملف إكسيل أودو (xlsx)", type=["xlsx", "xls"], label_visibility="collapsed")
-        if excel_file is not None and st.button("📥 قراءة ملف الإكسيل المرفوع", use_container_width=True):
-            with st.spinner("جاري قراءة وتدقيق ملف الإكسيل المرفوع..."):
-                try:
-                    records = processor.parse_odoo_excel_file(excel_file)
-                    st.session_state.raw_records = records
-                    st.session_state.active_date_str = fetch_date_str
-                    st.session_state.pdf_cache = None
-                    st.success(f"✅ تم تحميل وتدقيق {len(records)} جلسة من ملف الإكسيل.")
-                except Exception as e:
-                    st.error(f"❌ خطأ في معالجة الملف: {e}")
-
-    # Display and Edit Records Table
-    records = st.session_state.get("raw_records", [])
-    if records:
-        st.markdown("---")
-        st.markdown(f"#### 📋 معاينة وتدقيق الجلسات المجلوبة ليوم ({st.session_state.active_date_str}):")
-
-        # Smart Audit Notice
-        has_adj = any(abs(r.get("acc_adjustment", 0.0)) > 0.001 for r in records)
-        if has_adj:
-            adj_sessions = [f"{r['closing_no']} ({r['showroom']}): {r['acc_adjustment']:+,.2f} ر.س" for r in records if abs(r.get("acc_adjustment", 0.0)) > 0.001]
+    
+        col1, col2, col3 = st.columns([1.5, 1.5, 2])
+        with col1:
+            radar_date = st.date_input("تاريخ يوم التقرير المستهدف:", value=date.today())
+            target_date_str = radar_date.strftime("%Y-%m-%d")
+        with col2:
+            allow_secondary = st.checkbox("السماح ببقاء الجلسات الفرعية الشهرية مفتوحة", value=True)
+        with col3:
+            st.write("")
+            st.write("")
+            btn_scan = st.button("🔍 مسح جلسات نقاط البيع الآن", type="primary", use_container_width=True)
+    
+        if btn_scan or "radar_cache" in st.session_state:
+            if btn_scan:
+                with st.spinner("جاري الاتصال بسيرفر أودو وفحص حالة جلسات نقاط البيع..."):
+                    try:
+                        db = SessionLocal()
+                        proc = SalesDataProcessor(db)
+                        client = OdooClient()
+                        radar_result = client.scan_morning_radar(target_date_str, allow_secondary_monthly=allow_secondary)
+                        st.session_state.radar_cache = radar_result
+                        st.session_state.active_date_str = target_date_str
+                    except Exception as e:
+                        st.error(f"❌ خطأ أثناء الاتصال بأودو: {e}")
+                    finally:
+                        db.close()
+    
+            radar_data = st.session_state.get("radar_cache")
+            if radar_data:
+                stats = radar_data["stats"]
+    
+                # KPI Summary Row
+                r_col1, r_col2, r_col3, r_col4 = st.columns(4)
+                with r_col1:
+                    st.metric("إجمالي نقاط البيع النشطة", stats["total_pos_scanned"])
+                with r_col2:
+                    st.metric("الجلسات المقفلة الجاهزة", stats["closed_ready_count"])
+                with r_col3:
+                    st.metric("جلسات فرعية مسموحة", stats["allowed_secondary_count"])
+                with r_col4:
+                    st.metric("معارض متأخرة في الإقفال", stats["late_count"], delta=f"-{stats['late_count']}" if stats["late_count"] > 0 else "جاهز", delta_color="inverse")
+    
+                # Readiness Banner
+                if radar_data["ready_for_daily_report"]:
+                    st.markdown(
+                        """
+                        <div class="alert-box alert-green">
+                            ✅ <b>كافة المعارض مقفلة وجاهزة لإصدار التقرير اليومي!</b><br/>
+                            يمكنك الانتقال فوراً إلى تبويب <b>(جلب بيانات المبيعات والمعاينة)</b> لتحميل البيانات والطباعة.
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+                else:
+                    st.markdown(
+                        f"""
+                        <div class="alert-box alert-red">
+                            ⚠️ <b>تنبيه: يوجد عدد ({stats['late_count']}) معرضاً متأخراً في الإقفال لم تقفل جلساتهم حتى الآن:</b><br/>
+                            يُرجى التواصل مع مدراء المعارض أدناه لإقفال الصندوق، أو المتابعة إذا كانت هناك استثناءات.
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+    
+                # Details
+                if radar_data["late_showrooms"]:
+                    st.markdown("#### ⏳ قائمة المعارض المتأخرة:")
+                    late_df = pd.DataFrame(radar_data["late_showrooms"])[["pos_name", "session_name", "opened_by", "opened_at", "status_text"]]
+                    late_df.columns = ["نقطة البيع", "رقم الجلسة", "الكاشير / المدير", "تاريخ ووقت الفتح", "الحالة"]
+                    st.dataframe(late_df, use_container_width=True)
+    
+                if radar_data["allowed_secondary_sessions"]:
+                    with st.expander(f"ℹ️ الجلسات الفرعية الشهرية المسموح ببقائها ({len(radar_data['allowed_secondary_sessions'])} جلسة)"):
+                        sec_df = pd.DataFrame(radar_data["allowed_secondary_sessions"])[["pos_name", "session_name", "opened_at", "status_text"]]
+                        sec_df.columns = ["نقطة البيع", "رقم الجلسة", "تاريخ الفتح", "البيان"]
+                        st.dataframe(sec_df, use_container_width=True)
+    
+    # =============================================================================
+    # TAB 2: SALES DATA FETCHING & REVIEW
+    # =============================================================================
+    with tab_data:
+        st.subheader("🛒 جلب بيانات المبيعات والمعاينة والتدقيق (Data Intake & Audit)")
+        
+        radar_data = st.session_state.get("radar_cache")
+        if radar_data and radar_data.get("late_showrooms"):
             st.markdown(
                 f"""
-                <div style="background-color: #FEF3C7; border: 1px solid #F59E0B; color: #92400E; padding: 12px 16px; border-radius: 8px; margin-bottom: 12px; font-size: 10.5pt;">
-                    <strong>🔍 تدقيق قيود التسوية المحاسبية:</strong> تم رصد فروقات محاسبية لاحقة بعد إقفال مدراء المعارض، وتم توثيقها تلقائياً في عمود <b>(تعديل محاسبي)</b>:<br/>
-                    {' • '.join(adj_sessions)}
+                <div class="alert-box alert-red" style="margin-bottom: 15px;">
+                    <strong>⚠️ تنبيه تحذيري من الرادار الصباحي:</strong> هناك {len(radar_data['late_showrooms'])} معارض لم تغلق جلساتها الرئيسية، وقد لا تظهر مبيعاتها في التقرير إلا بعد إقفالها:<br/>
+                    {'<br/>'.join(f"• <b>{x['pos_name']}</b>: {x['status_text']}" for x in radar_data['late_showrooms'])}
                 </div>
                 """,
                 unsafe_allow_html=True
             )
-
-        df_edit = pd.DataFrame(records)
-
-        # Reorder and format columns
-        display_cols = [
-            "closing_no", "showroom", "date", "closing_hour",
-            "net_total", "returns", "tax", "net_sales",
-            "open", "credit", "cash", "commissions", "expenses", "diff", "acc_adjustment"
-        ]
-
-        column_config = {
-            "closing_no": st.column_config.TextColumn("رقم الإقفال", disabled=True),
-            "showroom": st.column_config.TextColumn("المعرض", disabled=True),
-            "date": st.column_config.TextColumn("التاريخ", disabled=True),
-            "closing_hour": st.column_config.NumberColumn("ساعة الإقفال", disabled=True),
-            "net_total": st.column_config.NumberColumn("الإجمالي", format="%.2f"),
-            "returns": st.column_config.NumberColumn("ج. المردودات", format="%.2f"),
-            "tax": st.column_config.NumberColumn("الضريبة", format="%.2f"),
-            "net_sales": st.column_config.NumberColumn("ص. الدخل", format="%.2f"),
-            "open": st.column_config.NumberColumn("الافتتاحي", format="%.2f"),
-            "credit": st.column_config.NumberColumn("الشبكة", format="%.2f"),
-            "cash": st.column_config.NumberColumn("النقد", format="%.2f"),
-            "commissions": st.column_config.NumberColumn("عمولات", format="%.0f"),
-            "expenses": st.column_config.NumberColumn("مصاريف", format="%.2f"),
-            "diff": st.column_config.NumberColumn("الفارق", format="%.2f"),
-            "acc_adjustment": st.column_config.NumberColumn("تعديل محاسبي", format="%.2f"),
-        }
-
-        edited_df = st.data_editor(
-            df_edit[display_cols],
-            column_config=column_config,
-            use_container_width=True,
-            num_rows="fixed",
-            key="sales_editor"
-        )
-
-        # Update back to session state
-        updated_records = edited_df.to_dict(orient="records")
-        for i, up_r in enumerate(updated_records):
-            for orig_k, orig_v in records[i].items():
-                if orig_k not in up_r:
-                    up_r[orig_k] = orig_v
-            up_r["total"] = up_r["net_total"] + up_r["returns"]
-
-        summary = processor.process_selected_records(updated_records)
-        st.session_state.processed_summary = summary
-        gt = summary["grand_totals"]
-
-        # Real-time Executive Summary Ribbon
-        st.markdown("#### 📈 إجماليات الدفعة الحالية المعتمدة:")
-        kpi_col1, kpi_col2, kpi_col3, kpi_col4, kpi_col5, kpi_col6 = st.columns(6)
-        with kpi_col1:
-            st.metric("عدد المعارض", f"{gt['unique_showrooms_count']}")
-        with kpi_col2:
-            st.metric("المبيعات (ريال)", f"{gt['total']:,.2f}")
-        with kpi_col3:
-            st.metric("ص. الدخل (ريال)", f"{gt['net_sales']:,.2f}")
-        with kpi_col4:
-            st.metric("الشبكة (ريال)", f"{gt['credit']:,.2f}")
-        with kpi_col5:
-            st.metric("النقد (ريال)", f"{gt['cash']:,.2f}")
-        with kpi_col6:
-            st.metric("التحويل (ريال)", f"{gt['trans']:,.2f}")
-
-        with st.expander("📊 التحليل البصري لطرق التحصيل اليومية (شبكة vs نقد vs تحويل)"):
-            fig_daily_pay = charts.build_daily_payment_donut(gt)
-            st.plotly_chart(fig_daily_pay, use_container_width=True, config=PLOTLY_CONFIG)
-    else:
-        st.info("👈 اضغط على أحد أزرار الجلب أعلاه لبدء مراجعة واعتماد المبيعات.")
-    db.close()
-
-# =============================================================================
-# TAB 3: PDF REPORTS GENERATION & COMMIT
-# =============================================================================
-with tab_print:
-    st.subheader("📄 محرك توليد تقارير الـ PDF الثلاثة والاعتماد (Exact Access Replicas)")
-    summary = st.session_state.processed_summary
-
-    if not summary or not summary.get("detailed_rows"):
-        st.warning("⚠️ يرجى أولاً جلب ومراجعة بيانات المبيعات في التبويب السابق قبل توليد التقارير.")
-    else:
-        detailed_rows = summary["detailed_rows"]
-        totals_rows = summary["totals_rows"]
-        grand_totals = summary["grand_totals"]
-
-        col_date, col_gen = st.columns([1.5, 2])
-        with col_date:
-            rep_date_input = st.date_input("تاريخ التقرير المطبوع:", value=date.today())
-            report_date_str = rep_date_input.strftime("%d/%m/%Y")
-            file_date_prefix = rep_date_input.strftime("%Y-%m-%d")
-
-        with col_gen:
+    
+        # Fetch Controls
+        c_btn1, c_btn2, c_date = st.columns([2, 2, 2])
+        with c_date:
+            fetch_date = st.date_input("تاريخ المبيعات المطلوبة:", value=date.today())
+            fetch_date_str = fetch_date.strftime("%Y-%m-%d")
+    
+        db = SessionLocal()
+        processor = SalesDataProcessor(db)
+    
+        with c_btn1:
             st.write("")
             st.write("")
-            gen_pdfs = st.button("🖨️ توليد ملفات الـ PDF الثلاثة الآن", type="primary", use_container_width=True)
-
-        if gen_pdfs or "pdf_cache" in st.session_state:
-            if gen_pdfs:
-                with st.spinner("جاري تصميم وتوليد ملفات الـ PDF الثلاثة بدقة البكسل والسرعة الفائقة..."):
+            if st.button("⚡ جلب مباشر وسريع من أودو (Odoo XML-RPC)", type="primary", use_container_width=True):
+                with st.spinner("جاري جلب إقفالات نقاط البيع من سيرفر أودو مباشرة..."):
                     try:
-                        pdf_generator = PDFReportGenerator()
-                        pdf_dict = pdf_generator.generate_all_three_pdfs(detailed_rows, totals_rows, grand_totals, report_date_str)
-                        detailed_bytes = pdf_dict["detailed"]
-                        totals_bytes = pdf_dict["totals"]
-                        color_bytes = pdf_dict["color"]
-
-                        st.session_state.pdf_cache = {
-                            "detailed": detailed_bytes,
-                            "totals": totals_bytes,
-                            "color": color_bytes,
-                            "date_prefix": file_date_prefix
-                        }
-                        st.success("✅ تم توليد ملفات الـ PDF الثلاثة بنجاح وجاهزة للتنزيل والطباعة!")
+                        client = OdooClient()
+                        records = client.fetch_daily_pos_records(fetch_date_str, processor.resolver)
+                        st.session_state.raw_records = records
+                        st.session_state.active_date_str = fetch_date_str
+                        st.session_state.pdf_cache = None
+                        st.success(f"✅ تم بنجاح جلب {len(records)} جلسة من أودو.")
                     except Exception as e:
-                        st.error(f"❌ تعذر توليد ملفات الـ PDF: {e}")
-
-            pdf_cache = st.session_state.get("pdf_cache")
-            if pdf_cache:
-                d_prefix = pdf_cache["date_prefix"]
-                st.markdown("---")
-                st.markdown("#### 📥 تنزيل وطباعة التقارير الرسمية المعتمدة:")
-
-                col_dl1, col_dl2, col_dl3 = st.columns(3)
-                with col_dl1:
-                    st.download_button(
-                        label=f"📄 تحميل التقرير التفصيلي ({d_prefix}rep.pdf)",
-                        data=pdf_cache["detailed"],
-                        file_name=f"{d_prefix}rep.pdf",
-                        mime="application/pdf",
-                        use_container_width=True,
-                        type="primary"
-                    )
-                with col_dl2:
-                    st.download_button(
-                        label=f"📑 تحميل التقرير الإجمالي ({d_prefix}tot.pdf)",
-                        data=pdf_cache["totals"],
-                        file_name=f"{d_prefix}tot.pdf",
-                        mime="application/pdf",
-                        use_container_width=True
-                    )
-                with col_dl3:
-                    st.download_button(
-                        label=f"🎨 تحميل التقرير الرقابي الملون ({d_prefix}color.pdf)",
-                        data=pdf_cache["color"],
-                        file_name=f"{d_prefix}color.pdf",
-                        mime="application/pdf",
-                        use_container_width=True
-                    )
-
-                # COMMIT BATCH SECTION
-                st.markdown("---")
-                st.markdown("#### 🔒 اعتماد الدفعة وترحيل الجلسات إلى الأرشيف السحابي (Commit to tblOLD):")
-                st.write(
-                    "عند الضغط على اعتماد، سيتم حفظ نسخة رقمية من ملفات الـ PDF الثلاثة في الأرشيف السحابي، "
-                    "وترحيل أرقام الجلسات إلى جدول `tbl_old` لمنع تكرار طباعتها في الأيام القادمة."
+                        st.error(f"❌ خطأ أثناء الاتصال بأودو: {e}")
+    
+        with c_btn2:
+            st.write("")
+            st.write("")
+            excel_file = st.file_uploader("أو رفع ملف إكسيل أودو (xlsx)", type=["xlsx", "xls"], label_visibility="collapsed")
+            if excel_file is not None and st.button("📥 قراءة ملف الإكسيل المرفوع", use_container_width=True):
+                with st.spinner("جاري قراءة وتدقيق ملف الإكسيل المرفوع..."):
+                    try:
+                        records = processor.parse_odoo_excel_file(excel_file)
+                        st.session_state.raw_records = records
+                        st.session_state.active_date_str = fetch_date_str
+                        st.session_state.pdf_cache = None
+                        st.success(f"✅ تم تحميل وتدقيق {len(records)} جلسة من ملف الإكسيل.")
+                    except Exception as e:
+                        st.error(f"❌ خطأ في معالجة الملف: {e}")
+    
+        # Display and Edit Records Table
+        records = st.session_state.get("raw_records", [])
+        if records:
+            st.markdown("---")
+            st.markdown(f"#### 📋 معاينة وتدقيق الجلسات المجلوبة ليوم ({st.session_state.active_date_str}):")
+    
+            # Smart Audit Notice
+            has_adj = any(abs(r.get("acc_adjustment", 0.0)) > 0.001 for r in records)
+            if has_adj:
+                adj_sessions = [f"{r['closing_no']} ({r['showroom']}): {r['acc_adjustment']:+,.2f} ر.س" for r in records if abs(r.get("acc_adjustment", 0.0)) > 0.001]
+                st.markdown(
+                    f"""
+                    <div style="background-color: #FEF3C7; border: 1px solid #F59E0B; color: #92400E; padding: 12px 16px; border-radius: 8px; margin-bottom: 12px; font-size: 10.5pt;">
+                        <strong>🔍 تدقيق قيود التسوية المحاسبية:</strong> تم رصد فروقات محاسبية لاحقة بعد إقفال مدراء المعارض، وتم توثيقها تلقائياً في عمود <b>(تعديل محاسبي)</b>:<br/>
+                        {' • '.join(adj_sessions)}
+                    </div>
+                    """,
+                    unsafe_allow_html=True
                 )
-
-                confirm_commit = st.checkbox("أقر بصحة البيانات ومطابقة المبالغ وأرغب في اعتماد التقرير رسمياً")
-                if st.button("💾 اعتماد الدفعة وترحيل الجلسات رسمياً", type="primary", disabled=not confirm_commit):
-                    with st.spinner("جاري الترحيل والأرشفة..."):
-                        db = SessionLocal()
-                        batch_id = f"BATCH-{d_prefix}-{int(time.time())}"
+    
+            # Smart multi-day detection & quick filter
+            unique_dates = sorted(list(set(r.get("date", "") for r in records if r.get("date"))), reverse=True)
+            if len(unique_dates) > 1:
+                st.info(
+                    f"📅 **تم رصد جلسات لعدة تواريخ في هذه الدفعة** ({' • '.join(unique_dates)}): "
+                    f"يمكنك تحديد يوم معين لإصدار تقريره واعتماده بشكل مستقل، أو إبقاء جميع الأيام معاً."
+                )
+                col_filter, col_actions = st.columns([2.5, 3.5])
+                with col_filter:
+                    filter_choice = st.selectbox(
+                        "🎯 تصفية وتحديد جلسات يوم محدد:",
+                        options=["عرض كافة التواريخ"] + [f"جلسات يوم {d} فقط" for d in unique_dates],
+                        index=0,
+                        key="sales_day_filter"
+                    )
+                if filter_choice != "عرض كافة التواريخ":
+                    chosen_day = filter_choice.replace("جلسات يوم ", "").replace(" فقط", "")
+                    for r in records:
+                        r["selected"] = (r.get("date") == chosen_day)
+    
+            df_edit = pd.DataFrame(records)
+    
+            # Reorder and format columns
+            display_cols = [
+                "selected", "closing_no", "showroom", "date", "closing_hour",
+                "net_total", "returns", "tax", "net_sales",
+                "open", "credit", "cash", "commissions", "expenses", "diff", "acc_adjustment"
+            ]
+    
+            column_config = {
+                "selected": st.column_config.CheckboxColumn("تحديد", default=True, help="تحديد الجلسة لتضمينها في التقرير والاعتماد"),
+                "closing_no": st.column_config.TextColumn("رقم الإقفال", disabled=True),
+                "showroom": st.column_config.TextColumn("المعرض", disabled=True),
+                "date": st.column_config.TextColumn("التاريخ", disabled=True),
+                "closing_hour": st.column_config.NumberColumn("ساعة الإقفال", disabled=True),
+                "net_total": st.column_config.NumberColumn("الإجمالي", format="%.2f"),
+                "returns": st.column_config.NumberColumn("ج. المردودات", format="%.2f"),
+                "tax": st.column_config.NumberColumn("الضريبة", format="%.2f"),
+                "net_sales": st.column_config.NumberColumn("ص. الدخل", format="%.2f"),
+                "open": st.column_config.NumberColumn("الافتتاحي", format="%.2f"),
+                "credit": st.column_config.NumberColumn("الشبكة", format="%.2f"),
+                "cash": st.column_config.NumberColumn("النقد", format="%.2f"),
+                "commissions": st.column_config.NumberColumn("عمولات", format="%.0f"),
+                "expenses": st.column_config.NumberColumn("مصاريف", format="%.2f"),
+                "diff": st.column_config.NumberColumn("الفارق", format="%.2f"),
+                "acc_adjustment": st.column_config.NumberColumn("تعديل محاسبي", format="%.2f"),
+            }
+    
+            edited_df = st.data_editor(
+                df_edit[display_cols],
+                column_config=column_config,
+                use_container_width=True,
+                num_rows="fixed",
+                key="sales_editor"
+            )
+    
+            # Update back to session state
+            updated_records = edited_df.to_dict(orient="records")
+            for i, up_r in enumerate(updated_records):
+                for orig_k, orig_v in records[i].items():
+                    if orig_k not in up_r:
+                        up_r[orig_k] = orig_v
+                up_r["total"] = up_r["net_total"] + up_r["returns"]
+    
+            summary = processor.process_selected_records(updated_records)
+            st.session_state.processed_summary = summary
+            gt = summary["grand_totals"]
+    
+            # Real-time Executive Summary Ribbon
+            st.markdown("#### 📈 إجماليات الدفعة الحالية المعتمدة:")
+            kpi_col1, kpi_col2, kpi_col3, kpi_col4, kpi_col5, kpi_col6 = st.columns(6)
+            with kpi_col1:
+                st.metric("عدد المعارض", f"{gt['unique_showrooms_count']}")
+            with kpi_col2:
+                st.metric("المبيعات (ريال)", f"{gt['total']:,.2f}")
+            with kpi_col3:
+                st.metric("ص. الدخل (ريال)", f"{gt['net_sales']:,.2f}")
+            with kpi_col4:
+                st.metric("الشبكة (ريال)", f"{gt['credit']:,.2f}")
+            with kpi_col5:
+                st.metric("النقد (ريال)", f"{gt['cash']:,.2f}")
+            with kpi_col6:
+                st.metric("التحويل (ريال)", f"{gt['trans']:,.2f}")
+    
+            with st.expander("📊 التحليل البصري لطرق التحصيل اليومية (شبكة vs نقد vs تحويل)"):
+                fig_daily_pay = charts.build_daily_payment_donut(gt)
+                st.plotly_chart(fig_daily_pay, use_container_width=True, config=PLOTLY_CONFIG)
+        else:
+            st.info("👈 اضغط على أحد أزرار الجلب أعلاه لبدء مراجعة واعتماد المبيعات.")
+        db.close()
+    
+    # =============================================================================
+    # TAB 3: PDF REPORTS GENERATION & COMMIT
+    # =============================================================================
+    with tab_print:
+        st.subheader("📄 محرك توليد تقارير الـ PDF الثلاثة والاعتماد (Exact Access Replicas)")
+        summary = st.session_state.processed_summary
+    
+        if not summary or not summary.get("detailed_rows"):
+            st.warning("⚠️ يرجى أولاً جلب ومراجعة بيانات المبيعات في التبويب السابق قبل توليد التقارير.")
+        else:
+            detailed_rows = summary["detailed_rows"]
+            totals_rows = summary["totals_rows"]
+            grand_totals = summary["grand_totals"]
+    
+            # Smart auto-detection of default report date from detailed rows
+            default_rep_date = date.today()
+            row_dates = set(r.get("date") for r in detailed_rows if r.get("date"))
+            if len(row_dates) == 1:
+                d_str = list(row_dates)[0]
+                try:
+                    parts = [int(p) for p in d_str.split("/")]
+                    if len(parts) == 3:
+                        default_rep_date = date(parts[2], parts[1], parts[0])
+                except Exception:
+                    pass
+    
+            col_date, col_gen = st.columns([1.5, 2])
+            with col_date:
+                rep_date_input = st.date_input("تاريخ التقرير المطبوع:", value=default_rep_date)
+                report_date_str = rep_date_input.strftime("%d/%m/%Y")
+                file_date_prefix = rep_date_input.strftime("%Y-%m-%d")
+    
+            with col_gen:
+                st.write("")
+                st.write("")
+                gen_pdfs = st.button("🖨️ توليد ملفات الـ PDF الثلاثة الآن", type="primary", use_container_width=True)
+    
+            if gen_pdfs or "pdf_cache" in st.session_state:
+                if gen_pdfs:
+                    with st.spinner("جاري تصميم وتوليد ملفات الـ PDF الثلاثة بدقة البكسل والسرعة الفائقة..."):
                         try:
-                            new_batch = ReportBatch(
-                                batch_id=batch_id,
-                                report_date=d_prefix,
-                                sessions_count=grand_totals["sessions_count"],
-                                unique_showrooms_count=grand_totals["unique_showrooms_count"],
-                                total_sales=grand_totals["total"],
-                                net_sales=grand_totals["net_sales"],
-                                detailed_pdf_blob=pdf_cache["detailed"],
-                                totals_pdf_blob=pdf_cache["totals"],
-                                color_pdf_blob=pdf_cache["color"],
-                                notes=f"تم الاعتماد بواسطة المدير بتاريخ {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-                            )
-                            db.add(new_batch)
-
-                            for row in detailed_rows:
-                                c_no = row["closing_no"].strip()
-                                existing = db.query(OldClosing).filter(OldClosing.closing_no == c_no).first()
-                                if not existing:
-                                    db.add(OldClosing(
-                                        closing_no=c_no,
-                                        showroom_short=row["showroom"],
-                                        closing_date=row["date"],
-                                        net_total=row["net_total"],
-                                        batch_id=batch_id
-                                    ))
-                            db.commit()
-                            get_cached_system_stats.clear()
-
-                            st.success(f"🎉 تم اعتماد الدفعة رقم `{batch_id}` وترحيل {len(detailed_rows)} جلسة إلى جدول tblOLD بنجاح!")
-                            st.session_state.raw_records = []
-                            st.session_state.processed_summary = None
-                            st.session_state.pdf_cache = None
-                            time.sleep(2)
-                            st.rerun()
+                            pdf_generator = PDFReportGenerator()
+                            pdf_dict = pdf_generator.generate_all_three_pdfs(detailed_rows, totals_rows, grand_totals, report_date_str)
+                            detailed_bytes = pdf_dict["detailed"]
+                            totals_bytes = pdf_dict["totals"]
+                            color_bytes = pdf_dict["color"]
+    
+                            st.session_state.pdf_cache = {
+                                "detailed": detailed_bytes,
+                                "totals": totals_bytes,
+                                "color": color_bytes,
+                                "date_prefix": file_date_prefix
+                            }
+                            st.success("✅ تم توليد ملفات الـ PDF الثلاثة بنجاح وجاهزة للتنزيل والطباعة!")
                         except Exception as e:
-                            db.rollback()
-                            st.error(f"❌ فشل الاعتماد: {e}")
-                        finally:
-                            db.close()
-
+                            st.error(f"❌ تعذر توليد ملفات الـ PDF: {e}")
+    
+                pdf_cache = st.session_state.get("pdf_cache")
+                if pdf_cache:
+                    d_prefix = pdf_cache["date_prefix"]
+                    st.markdown("---")
+                    st.markdown("#### 📥 تنزيل وطباعة التقارير الرسمية المعتمدة:")
+    
+                    col_dl1, col_dl2, col_dl3 = st.columns(3)
+                    with col_dl1:
+                        st.download_button(
+                            label=f"📄 تحميل التقرير التفصيلي ({d_prefix}rep.pdf)",
+                            data=pdf_cache["detailed"],
+                            file_name=f"{d_prefix}rep.pdf",
+                            mime="application/pdf",
+                            use_container_width=True,
+                            type="primary"
+                        )
+                    with col_dl2:
+                        st.download_button(
+                            label=f"📑 تحميل التقرير الإجمالي ({d_prefix}tot.pdf)",
+                            data=pdf_cache["totals"],
+                            file_name=f"{d_prefix}tot.pdf",
+                            mime="application/pdf",
+                            use_container_width=True
+                        )
+                    with col_dl3:
+                        st.download_button(
+                            label=f"🎨 تحميل التقرير الرقابي الملون ({d_prefix}color.pdf)",
+                            data=pdf_cache["color"],
+                            file_name=f"{d_prefix}color.pdf",
+                            mime="application/pdf",
+                            use_container_width=True
+                        )
+    
+                    # COMMIT BATCH SECTION
+                    st.markdown("---")
+                    st.markdown("#### 🔒 اعتماد الدفعة وترحيل الجلسات إلى الأرشيف السحابي (Commit to tblOLD):")
+                    st.write(
+                        "عند الضغط على اعتماد، سيتم حفظ نسخة رقمية من ملفات الـ PDF الثلاثة في الأرشيف السحابي، "
+                        "وترحيل أرقام الجلسات إلى جدول `tbl_old` لمنع تكرار طباعتها في الأيام القادمة."
+                    )
+    
+                    confirm_commit = st.checkbox("أقر بصحة البيانات ومطابقة المبالغ وأرغب في اعتماد التقرير رسمياً")
+                    if st.button("💾 اعتماد الدفعة وترحيل الجلسات رسمياً", type="primary", disabled=not confirm_commit):
+                        with st.spinner("جاري الترحيل والأرشفة..."):
+                            db = SessionLocal()
+                            batch_id = f"BATCH-{d_prefix}-{int(time.time())}"
+                            try:
+                                new_batch = ReportBatch(
+                                    batch_id=batch_id,
+                                    report_date=d_prefix,
+                                    sessions_count=grand_totals["sessions_count"],
+                                    unique_showrooms_count=grand_totals["unique_showrooms_count"],
+                                    total_sales=grand_totals["total"],
+                                    net_sales=grand_totals["net_sales"],
+                                    detailed_pdf_blob=pdf_cache["detailed"],
+                                    totals_pdf_blob=pdf_cache["totals"],
+                                    color_pdf_blob=pdf_cache["color"],
+                                    notes=f"تم الاعتماد بواسطة المدير بتاريخ {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                                )
+                                db.add(new_batch)
+    
+                                for row in detailed_rows:
+                                    c_no = row["closing_no"].strip()
+                                    existing = db.query(OldClosing).filter(OldClosing.closing_no == c_no).first()
+                                    if not existing:
+                                        db.add(OldClosing(
+                                            closing_no=c_no,
+                                            showroom_short=row["showroom"],
+                                            closing_date=row["date"],
+                                            net_total=row["net_total"],
+                                            batch_id=batch_id
+                                        ))
+                                db.commit()
+                                get_cached_system_stats.clear()
+    
+                                st.success(f"🎉 تم اعتماد الدفعة رقم `{batch_id}` وترحيل {len(detailed_rows)} جلسة إلى جدول tblOLD بنجاح!")
+                                st.session_state.raw_records = []
+                                st.session_state.processed_summary = None
+                                st.session_state.pdf_cache = None
+                                time.sleep(2)
+                                st.rerun()
+                            except Exception as e:
+                                db.rollback()
+                                st.error(f"❌ فشل الاعتماد: {e}")
+                            finally:
+                                db.close()
+    
 # =============================================================================
 # TAB 4: PERIODIC & COMPARATIVE EXECUTIVE SALES REPORTS
 # =============================================================================
@@ -612,9 +693,12 @@ with tab_monthly:
         "بالإضافة إلى تقارير المقارنات التحليلية وحساب نسب النمو والانخفاض مباشرة من قيود أودو مع التصدير الفوري لإكسيل وPDF رسمي."
     )
 
-    sub_periodic, sub_comparative = st.tabs([
+    sub_periodic, sub_comparative, sub_multidim, sub_matrix, sub_pareto = st.tabs([
         "📅 تقارير الفترات الزمنية (Periodic Sales Reports)",
-        "📈 تقارير المقارنات ونسب النمو (Comparative & Growth Analytics)"
+        "📈 تقارير المقارنات ونسب النمو (Comparative & Growth Analytics)",
+        "🏷️ تحليل الموردين (SG0) وأنواع البضاعة (Vendors & Categories)",
+        "🏢 مصفوفة المعارض والموردين (Cross-Tab Matrix)",
+        "🎯 تحليل باريتو والتركيز (Pareto ABC)"
     ])
 
     # -------------------------------------------------------------------------
@@ -1217,270 +1301,633 @@ with tab_monthly:
                     )
                     st.plotly_chart(fig_c, use_container_width=True, config=PLOTLY_CONFIG)
 
+    # -------------------------------------------------------------------------
+    # SUB-TAB 3: MULTI-DIMENSIONAL SUPPLIERS (SG0) & PRODUCT CATEGORIES
+    # -------------------------------------------------------------------------
+    with sub_multidim:
+        st.markdown("#### 🏷️ تحليل مبيعات الموردين (SG0) وأنواع البضاعة (Multi-Dimensional Sales Breakdown):")
+        st.caption("تقسيم شامل لحجم المبيعات حسب تاغات الموردين (SG0) وأنواع البضاعة من أودو، مع إمكانية التبديل بين البُعد الرئيسي والفرعي، والمقارنة الزمنية.")
+
+        md_col1, md_col2, md_col3, md_col4 = st.columns([1.5, 1.5, 1.5, 1.5])
+        with md_col1:
+            md_mode = st.radio(
+                "نمط التقرير التحليلي:",
+                ["📅 تقرير فترة زمنية محددة", "📈 مقارنة بين فترتين ونسب النمو"],
+                horizontal=True,
+                key="md_mode_radio"
+            )
+
+        with md_col2:
+            prim_dim_choice = st.selectbox(
+                "البُعد الرئيسي (Primary Dimension):",
+                ["المورد (حسب تاغات SG0)", "نوع البضاعة (Product Category)"],
+                key="md_prim_dim"
+            )
+            prim_key = "vendor" if "المورد" in prim_dim_choice else "category"
+
+        with md_col3:
+            default_sec = "نوع البضاعة (Product Category)" if prim_key == "vendor" else "المورد (حسب تاغات SG0)"
+            sec_options = [default_sec, "بدون تقسيم فرعي"]
+            sec_dim_choice = st.selectbox(
+                "التقسيم الفرعي / التفصيلي (Secondary):",
+                sec_options,
+                key="md_sec_dim"
+            )
+            sec_key = None if "بدون" in sec_dim_choice else ("category" if prim_key == "vendor" else "vendor")
+
+        with md_col4:
+            # Showroom filter
+            db_m = SessionLocal()
+            sh_list = db_m.query(Showroom).filter(Showroom.Active == True).order_by(Showroom.Code).all()
+            db_m.close()
+            sh_options = ["🏢 كافة معارض الشركة (إجمالي)"] + [f"{s.Code} - {s.Name}" for s in sh_list]
+            sh_selected = st.selectbox("تصفية حسب المعرض:", sh_options, key="md_sh_filter")
+            sh_cfg_id = None
+            if sh_selected != "🏢 كافة معارض الشركة (إجمالي)":
+                sel_code = sh_selected.split(" - ")[0].strip()
+                try:
+                    c_temp = OdooClient()
+                    if c_temp.connect():
+                        cfg_rec = c_temp._models.execute_kw(
+                            c_temp.db, c_temp.uid, c_temp.password,
+                            'pos.config', 'search_read',
+                            [[('name', 'like', sel_code)]],
+                            {'fields': ['id', 'name'], 'limit': 1}
+                        )
+                        if cfg_rec:
+                            sh_cfg_id = cfg_rec[0]['id']
+                except Exception:
+                    pass
+
+        st.markdown("---")
+        if md_mode == "📅 تقرير فترة زمنية محددة":
+            dc1, dc2, dc3 = st.columns([1.5, 1.5, 1.5])
+            with dc1:
+                today = date.today()
+                first_of_month = date(today.year, today.month, 1)
+                md_d1 = st.date_input("تاريخ بداية الفترة:", value=first_of_month, key="md_d1")
+            with dc2:
+                md_d2 = st.date_input("تاريخ نهاية الفترة:", value=today, key="md_d2")
+            with dc3:
+                st.write("")
+                st.write("")
+                btn_run_md = st.button("🚀 استخراج تقرير الموردين والأصناف", type="primary", use_container_width=True, key="btn_run_md")
+
+            if btn_run_md:
+                with st.spinner("جاري جلب خطوط المبيعات وفحص تاغات الموردين والتصنيفات من أودو..."):
+                    try:
+                        client_md = OdooClient()
+                        res_md = client_md.fetch_multidim_period_sales(
+                            start_date=md_d1.strftime("%Y-%m-%d"),
+                            end_date=md_d2.strftime("%Y-%m-%d"),
+                            primary_dim=prim_key,
+                            secondary_dim=sec_key,
+                            showroom_config_id=sh_cfg_id,
+                            title=f"تقرير مبيعات {prim_dim_choice} ({sh_selected})"
+                        )
+                        st.session_state["cache_md_res"] = res_md
+                    except Exception as e:
+                        st.error(f"❌ حدث خطأ أثناء جلب البيانات من Odoo: {e}")
+
+            if "cache_md_res" in st.session_state:
+                res_md = st.session_state["cache_md_res"]
+                gt = res_md["grand_totals"]
+
+                # KPI Cards
+                st.markdown("##### 📌 ملخص المؤشرات الإجمالية للفترة:")
+                k1, k2, k3, k4, k5 = st.columns(5)
+                k1.metric("صافي المبيعات (Net)", f"{gt['net']:,.2f} ر.س")
+                k2.metric("إجمالي المبيعات مع الضريبة", f"{gt['gross']:,.2f} ر.س")
+                k3.metric("ضريبة القيمة المضافة (15%)", f"{gt['tax']:,.2f} ر.س")
+                k4.metric("إجمالي الكميات المباعة", f"{gt['qty']:,.0f} قطعة")
+                k5.metric("عدد المنتجات المباعة", f"{gt['products_count']:,} صنفاً")
+
+                # Main Dataframe
+                st.markdown(f"##### 📊 جدول تحليل {prim_dim_choice} مرتبة من الأعلى إلى الأقل:")
+                df_rows = []
+                for r in res_md["rows"]:
+                    df_rows.append({
+                        "م": r["seq"],
+                        "البيان / الاسم": r["name"],
+                        "صافي المبيعات (ر.س)": f"{r['net']:,.2f}",
+                        "الضريبة (ر.س)": f"{r['tax']:,.2f}",
+                        "الإجمالي (ر.س)": f"{r['gross']:,.2f}",
+                        "الكمية المباعة": f"{r['qty']:,.1f}",
+                        "عدد الأصناف": r["items_count"],
+                        "الحصة السوقية": f"{r['share_pct']}%"
+                    })
+                st.dataframe(pd.DataFrame(df_rows), use_container_width=True)
+
+                # Secondary Drilldowns (Expanders)
+                if sec_key and any(r.get("sub_rows") for r in res_md["rows"]):
+                    st.markdown("##### 🔍 تفاصيل التقسيم الفرعي التابع لكل مجموعة:")
+                    for r in res_md["rows"]:
+                        if r.get("sub_rows"):
+                            with st.expander(f"📁 تفاصيل: {r['name']} — (صافي: {r['net']:,.2f} ر.س | حصة: {r['share_pct']}%)"):
+                                sub_df = []
+                                for s in r["sub_rows"]:
+                                    sub_df.append({
+                                        "القسم الفرعي": s["name"],
+                                        "الصافي (ر.س)": f"{s['net']:,.2f}",
+                                        "الإجمالي (ر.س)": f"{s['gross']:,.2f}",
+                                        "الكمية": f"{s['qty']:,.1f}",
+                                        "عدد الأصناف": s["items_count"],
+                                        "النسبة من المجموعة": f"{s['share_pct']}%"
+                                    })
+                                st.dataframe(pd.DataFrame(sub_df), use_container_width=True)
+
+                # Export to Excel
+                excel_bytes = generate_multidim_excel(res_md)
+                st.download_button(
+                    label="📥 تحميل تقرير التحليل متعدد الأبعاد بصيغة Excel (.xlsx)",
+                    data=excel_bytes,
+                    file_name=f"MultiDim_Sales_{res_md['start_date']}_{res_md['end_date']}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+
+        else: # Comparative Mode
+            dc1, dc2, dc3, dc4 = st.columns(4)
+            with dc1:
+                cur_d1 = st.date_input("بداية الفترة الحالية:", value=date.today() - timedelta(days=30), key="md_c_d1")
+            with dc2:
+                cur_d2 = st.date_input("نهاية الفترة الحالية:", value=date.today(), key="md_c_d2")
+            with dc3:
+                prev_d1 = st.date_input("بداية فترة المقارنة السابقة:", value=date.today() - timedelta(days=60), key="md_p_d1")
+            with dc4:
+                prev_d2 = st.date_input("نهاية فترة المقارنة السابقة:", value=date.today() - timedelta(days=31), key="md_p_d2")
+
+            btn_run_md_comp = st.button("📈 استخراج تقرير المقارنة ونسب النمو", type="primary", use_container_width=True, key="btn_run_md_comp")
+            if btn_run_md_comp:
+                with st.spinner("جاري جلب ومقارنة فترتي المبيعات من أودو..."):
+                    try:
+                        client_md = OdooClient()
+                        c_p = {"start_date": cur_d1.strftime("%Y-%m-%d"), "end_date": cur_d2.strftime("%Y-%m-%d"), "label": "الفترة الحالية"}
+                        p_p = {"start_date": prev_d1.strftime("%Y-%m-%d"), "end_date": prev_d2.strftime("%Y-%m-%d"), "label": "فترة المقارنة"}
+                        comp_res = client_md.fetch_multidim_comparative_sales(
+                            current_period=c_p,
+                            previous_period=p_p,
+                            dimension=prim_key,
+                            showroom_config_id=sh_cfg_id,
+                            title=f"تقرير مقارنة مبيعات {prim_dim_choice}"
+                        )
+                        st.session_state["cache_md_comp"] = comp_res
+                    except Exception as e:
+                        st.error(f"❌ حدث خطأ أثناء جلب مقارنة المبيعات: {e}")
+
+            if "cache_md_comp" in st.session_state:
+                c_res = st.session_state["cache_md_comp"]
+                gt = c_res["grand_totals"]
+
+                # Metrics
+                st.markdown("##### 📌 مؤشرات مقارنة النمو المالي الإجمالي:")
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("مبيعات الفترة الحالية", f"{gt['current_net']:,.2f} ر.س")
+                m2.metric("مبيعات فترة المقارنة", f"{gt['previous_net']:,.2f} ر.س")
+                growth_color = "normal" if gt["diff_net"] >= 0 else "inverse"
+                m3.metric("الفارق المالي", f"{gt['diff_net']:+,.2f} ر.س", delta=f"{gt['diff_net']:+,.2f} ر.س", delta_color=growth_color)
+                m4.metric("نسبة النمو العامة", f"{gt['growth_pct']:+.2f}%", delta=f"{gt['growth_pct']:+.2f}%", delta_color=growth_color)
+
+                # Comparative Table
+                st.markdown(f"##### 📊 جدول مقارنة مبيعات {prim_dim_choice}:")
+                c_table = []
+                for r in c_res["rows"]:
+                    c_table.append({
+                        "م": r["seq"],
+                        "الاسم": r["name"],
+                        "مبيعات سابقة (ر.س)": f"{r['previous_net']:,.2f}",
+                        "مبيعات حالية (ر.س)": f"{r['current_net']:,.2f}",
+                        "الفارق المالي (ر.س)": f"{r['diff_net']:+,.2f}",
+                        "نسبة النمو %": f"{r['growth_pct']:+.2f}%"
+                    })
+                st.dataframe(pd.DataFrame(c_table), use_container_width=True)
+
+    # -------------------------------------------------------------------------
+    # SUB-TAB 4: SHOWROOM × VENDOR CROSS-TAB MATRIX
+    # -------------------------------------------------------------------------
+    with sub_matrix:
+        st.markdown("#### 🏢 مصفوفة توزيع مبيعات المعارض والموردين (Showroom × Vendor Matrix):")
+        st.caption("مصفوفة تقاطعية توضح مساهمة كل مورد في كل معرض على حدة، وحصته من مبيعات المعرض مع الإجماليات الأفقية والعمودية.")
+
+        mx_c1, mx_c2, mx_c3 = st.columns([1.5, 1.5, 1.5])
+        with mx_c1:
+            today = date.today()
+            mx_d1 = st.date_input("تاريخ بداية المصفوفة:", value=date(today.year, today.month, 1), key="mx_d1")
+        with mx_c2:
+            mx_d2 = st.date_input("تاريخ نهاية المصفوفة:", value=today, key="mx_d2")
+        with mx_c3:
+            st.write("")
+            st.write("")
+            btn_run_mx = st.button("🚀 توليد مصفوفة المعارض والموردين", type="primary", use_container_width=True, key="btn_run_mx")
+
+        if btn_run_mx:
+            with st.spinner("جاري استخراج مبيعات كافة المعارض وتقسيمها حسب الموردين من أودو..."):
+                try:
+                    c_mx = OdooClient()
+                    db_resolver = SessionLocal()
+                    from processor import ShowroomMappingResolver
+                    res_resolver = ShowroomMappingResolver(db_resolver)
+                    mx_res = c_mx.fetch_showroom_vendor_matrix(
+                        start_date=mx_d1.strftime("%Y-%m-%d"),
+                        end_date=mx_d2.strftime("%Y-%m-%d"),
+                        showroom_resolver=res_resolver
+                    )
+                    db_resolver.close()
+                    st.session_state["cache_mx_res"] = mx_res
+                except Exception as e:
+                    st.error(f"❌ حدث خطأ أثناء بناء المصفوفة: {e}")
+
+        if "cache_mx_res" in st.session_state:
+            mx_res = st.session_state["cache_mx_res"]
+            st.markdown(f"##### 📌 إجمالي مبيعات الشركة للمصفوفة: **{mx_res['grand_total_net']:,.2f} ر.س** عبر {len(mx_res['rows'])} معرضاً.")
+
+            view_mode = st.radio("طريقة عرض القيم في المصفوفة:", ["المبالغ بالريال (ر.س)", "نسبة مساهمة المورد في كل معرض %"], horizontal=True, key="mx_view_mode")
+
+            vendors = mx_res["vendor_names"]
+            table_rows = []
+            for r in mx_res["rows"]:
+                sh_tot = r["total_net"]
+                row_dict = {
+                    "الكود": r["code"],
+                    "المعرض": r["showroom"]
+                }
+                for v in vendors:
+                    v_val = r.get(v, 0.0)
+                    if view_mode == "المبالغ بالريال (ر.س)":
+                        row_dict[v] = f"{v_val:,.2f}"
+                    else:
+                        pct = (v_val / sh_tot * 100.0) if sh_tot > 0 else 0.0
+                        row_dict[v] = f"{pct:.1f}%"
+
+                row_dict["إجمالي المعرض (ر.س)"] = f"{sh_tot:,.2f}"
+                table_rows.append(row_dict)
+
+            if view_mode == "المبالغ بالريال (ر.س)":
+                footer_dict = {
+                    "الكود": "-",
+                    "المعرض": "🔴 إجمالي المورد (الشركة ككل)"
+                }
+                v_tots = mx_res["vendor_totals"]
+                for v in vendors:
+                    footer_dict[v] = f"{v_tots.get(v, 0.0):,.2f}"
+                footer_dict["إجمالي المعرض (ر.س)"] = f"{mx_res['grand_total_net']:,.2f}"
+                table_rows.append(footer_dict)
+
+            st.dataframe(pd.DataFrame(table_rows), use_container_width=True)
+
+            excel_mx = generate_showroom_matrix_excel(mx_res)
+            st.download_button(
+                label="📥 تحميل مصفوفة المعارض والموردين بصيغة Excel (.xlsx)",
+                data=excel_mx,
+                file_name=f"Showroom_Vendor_Matrix_{mx_res['start_date']}_{mx_res['end_date']}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+
+    # -------------------------------------------------------------------------
+    # SUB-TAB 5: PARETO ABC REVENUE CLASSIFICATION
+    # -------------------------------------------------------------------------
+    with sub_pareto:
+        st.markdown("#### 🎯 تحليل باريتو والتركيز المالي (Pareto ABC Analysis 80/20):")
+        st.caption("تصنيف استراتيجي للمبيعات لتحديد الفئة (A) المسؤولة عن 80% من الإيرادات، والفئة (B) 15%، والفئة (C) 5% من المبيعات.")
+
+        par_c1, par_c2, par_c3, par_c4 = st.columns([1.5, 1.5, 1.5, 1.5])
+        with par_c1:
+            par_entity = st.selectbox(
+                "مستوى التحليل المطلوب:",
+                ["الأصناف والمنتجات (Products)", "الموردين (Vendors)", "أنواع البضاعة (Categories)"],
+                key="par_entity_sel"
+            )
+            par_key = "product" if "الأصناف" in par_entity else ("vendor" if "الموردين" in par_entity else "category")
+        with par_c2:
+            today = date.today()
+            par_d1 = st.date_input("بداية فترة التحليل:", value=date(today.year, today.month, 1), key="par_d1")
+        with par_c3:
+            par_d2 = st.date_input("نهاية فترة التحليل:", value=today, key="par_d2")
+        with par_c4:
+            st.write("")
+            st.write("")
+            btn_run_par = st.button("🚀 تشغيل تحليل باريتو ABC", type="primary", use_container_width=True, key="btn_run_par")
+
+        if btn_run_par:
+            with st.spinner("جاري حساب التوزيع التراكمي وتصنيف باريتو ABC..."):
+                try:
+                    c_par = OdooClient()
+                    par_res = c_par.fetch_pareto_abc_analysis(
+                        start_date=par_d1.strftime("%Y-%m-%d"),
+                        end_date=par_d2.strftime("%Y-%m-%d"),
+                        entity_type=par_key
+                    )
+                    st.session_state["cache_par_res"] = par_res
+                except Exception as e:
+                    st.error(f"❌ حدث خطأ أثناء تشغيل تحليل باريتو: {e}")
+
+        if "cache_par_res" in st.session_state:
+            par_res = st.session_state["cache_par_res"]
+            s = par_res["summary"]
+            tot_rev = par_res["total_revenue"]
+
+            # KPI Summary
+            st.markdown("##### 📌 مؤشرات التركيز الاستراتيجي (ABC Summary):")
+            pa1, pa2, pa3, pa4 = st.columns(4)
+            pa1.metric("إجمالي المبيعات المحللة", f"{tot_rev:,.2f} ر.س")
+            pa2.metric("الفئة A (حرج 80%)", f"{s['class_a']} عنصر ({s['class_a'] / s['total_items'] * 100:.1f}%)" if s['total_items'] else "0")
+            pa3.metric("الفئة B (متوسط 15%)", f"{s['class_b']} عنصر ({s['class_b'] / s['total_items'] * 100:.1f}%)" if s['total_items'] else "0")
+            pa4.metric("الفئة C (ذيل 5%)", f"{s['class_c']} عنصر ({s['class_c'] / s['total_items'] * 100:.1f}%)" if s['total_items'] else "0")
+
+            # Table
+            st.markdown(f"##### 📊 جدول ترتيب عناصر {par_entity} وتصنيفاتها:")
+            par_table = []
+            for it in par_res["items"]:
+                row_dict = {
+                    "م": it["seq"],
+                    "الاسم": it["name"],
+                    "صافي المبيعات (ر.س)": f"{it['net']:,.2f}",
+                    "النسبة التراكمية": f"{it['cum_pct']}%",
+                    "التصنيف (ABC)": f"فئة {it['abc_class']} ({it['class_desc']})"
+                }
+                if par_key == "product":
+                    row_dict["المورد (SG0)"] = it.get("vendor", "")
+                    row_dict["نوع البضاعة"] = it.get("category", "")
+                par_table.append(row_dict)
+
+            st.dataframe(pd.DataFrame(par_table), use_container_width=True)
+
+            excel_par = generate_pareto_excel(par_res)
+            st.download_button(
+                label="📥 تحميل تقرير باريتو ABC بصيغة Excel (.xlsx)",
+                data=excel_par,
+                file_name=f"Pareto_ABC_{par_res['start_date']}_{par_res['end_date']}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+
+
 # =============================================================================
 # TAB 5: ARCHIVE, SETTINGS & ROLLBACK
 # =============================================================================
-with tab_archive:
-    st.subheader("🗄️ سجل الدفعات السابقة، الأرشيف السحابي وإدارة النظام")
-
-    sub_archive, sub_rollback, sub_showrooms, sub_seed, sub_security = st.tabs([
-        "📁 سجل الدفعات السابقة",
-        "⏮️ التراجع عن آخر اعتماد (Rollback)",
-        "🏢 إدارة المعارض والمدن",
-        "📥 استيراد أرشيف الجلسات (tblOLD)",
-        "🛡️ أمان الأجهزة والربط السحابي"
-    ])
-
-    db = SessionLocal()
-
-    # 1. BATCHES ARCHIVE
-    with sub_archive:
-        st.markdown("#### 📂 استعراض وتحميل تقارير الدفعات السابقة:")
-        batches = db.query(ReportBatch).filter(ReportBatch.is_rolled_back == False).order_by(ReportBatch.created_at.desc()).all()
-        if not batches:
-            st.info("لا توجد دفعات معتمدة سابقة حتى الآن.")
-        else:
-            for b in batches:
-                with st.expander(f"📅 تقرير يوم: {b.report_date} | الدفعة: `{b.batch_id}` | المبيعات: {b.total_sales:,.2f} ريال ({b.unique_showrooms_count} معرضاً)"):
-                    st.write(f"• **تاريخ الاعتماد:** {b.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
-                    st.write(f"• **عدد الجلسات:** {b.sessions_count} | **صافي الدخل:** {b.net_sales:,.2f} ريال")
-                    c1, c2, c3 = st.columns(3)
-                    if b.detailed_pdf_blob:
-                        with c1:
-                            st.download_button(
-                                label="📥 التقرير التفصيلي (rep.pdf)",
-                                data=b.detailed_pdf_blob,
-                                file_name=f"{b.report_date}rep.pdf",
-                                mime="application/pdf",
-                                key=f"dl_rep_{b.batch_id}"
+if not is_viewer:
+    with tab_archive:
+        st.subheader("🗄️ سجل الدفعات السابقة، الأرشيف السحابي وإدارة النظام")
+    
+        sub_archive, sub_rollback, sub_showrooms, sub_seed, sub_security = st.tabs([
+            "📁 سجل الدفعات السابقة",
+            "⏮️ التراجع عن آخر اعتماد (Rollback)",
+            "🏢 إدارة المعارض والمدن",
+            "📥 استيراد أرشيف الجلسات (tblOLD)",
+            "🛡️ أمان الأجهزة والربط السحابي"
+        ])
+    
+        db = SessionLocal()
+    
+        # 1. BATCHES ARCHIVE
+        with sub_archive:
+            st.markdown("#### 📂 استعراض وتحميل تقارير الدفعات السابقة:")
+            batches = db.query(ReportBatch).filter(ReportBatch.is_rolled_back == False).order_by(ReportBatch.created_at.desc()).all()
+            if not batches:
+                st.info("لا توجد دفعات معتمدة سابقة حتى الآن.")
+            else:
+                for b in batches:
+                    with st.expander(f"📅 تقرير يوم: {b.report_date} | الدفعة: `{b.batch_id}` | المبيعات: {b.total_sales:,.2f} ريال ({b.unique_showrooms_count} معرضاً)"):
+                        st.write(f"• **تاريخ الاعتماد:** {b.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
+                        st.write(f"• **عدد الجلسات:** {b.sessions_count} | **صافي الدخل:** {b.net_sales:,.2f} ريال")
+                        c1, c2, c3 = st.columns(3)
+                        if b.detailed_pdf_blob:
+                            with c1:
+                                st.download_button(
+                                    label="📥 التقرير التفصيلي (rep.pdf)",
+                                    data=b.detailed_pdf_blob,
+                                    file_name=f"{b.report_date}rep.pdf",
+                                    mime="application/pdf",
+                                    key=f"dl_rep_{b.batch_id}"
+                                )
+                        if b.totals_pdf_blob:
+                            with c2:
+                                st.download_button(
+                                    label="📥 التقرير الإجمالي (tot.pdf)",
+                                    data=b.totals_pdf_blob,
+                                    file_name=f"{b.report_date}tot.pdf",
+                                    mime="application/pdf",
+                                    key=f"dl_tot_{b.batch_id}"
+                                )
+                        if b.color_pdf_blob:
+                            with c3:
+                                st.download_button(
+                                    label="📥 التقرير الرقابي (color.pdf)",
+                                    data=b.color_pdf_blob,
+                                    file_name=f"{b.report_date}color.pdf",
+                                    mime="application/pdf",
+                                    key=f"dl_col_{b.batch_id}"
+                                )
+    
+        # 2. ROLLBACK LAST BATCH
+        with sub_rollback:
+            st.markdown("#### ⚠️ التراجع عن آخر دفعة معتمدة (Rollback Last Batch):")
+            st.warning(
+                "تتيح لك هذه الميزة التراجع عن آخر دفعة اعتمدتها، وحذف جلساتها من جدول `tbl_old`، "
+                "لكي تتمكن من إعادة قراءة بيانات اليوم وإضافة أي معرض كان متأخراً وإعادة استخراج التقرير."
+            )
+    
+            last_batch = db.query(ReportBatch).filter(ReportBatch.is_rolled_back == False).order_by(ReportBatch.created_at.desc()).first()
+            if not last_batch:
+                st.info("لا توجد دفعات نشطة متاحة للتراجع.")
+            else:
+                st.write(f"• **آخر دفعة معتمدة:** `{last_batch.batch_id}`")
+                st.write(f"• **تاريخ التقرير:** {last_batch.report_date} | **عدد الجلسات:** {last_batch.sessions_count}")
+    
+                confirm_rb = st.checkbox("أؤكد رغبتي في التراجع عن هذه الدفعة وإلغاء ترحيل جلساتها من tblOLD")
+                if st.button("🚨 إلغاء اعتماد الدفعة واسترجاع الجلسات", type="secondary", disabled=not confirm_rb):
+                    try:
+                        db.query(OldClosing).filter(OldClosing.batch_id == last_batch.batch_id).delete()
+                        last_batch.is_rolled_back = True
+                        db.commit()
+                        get_cached_system_stats.clear()
+                        st.success(f"✅ تم التراجع عن الدفعة `{last_batch.batch_id}` بنجاح! يمكنك الآن إعادة إصدار التقرير.")
+                        time.sleep(2)
+                        st.rerun()
+                    except Exception as e:
+                        db.rollback()
+                        st.error(f"❌ خطأ أثناء التراجع: {e}")
+    
+        # 3. SHOWROOMS & CITIES MANAGEMENT
+        with sub_showrooms:
+            st.markdown("#### 🏢 قائمة المعارض ونقاط البيع المعتمدة (59 سجلاً):")
+            showrooms_list = db.query(Showroom).order_by(Showroom.No.asc()).all()
+            sh_data = []
+            for s in showrooms_list:
+                sh_data.append({
+                    "الكود": s.No,
+                    "اسم نقطة البيع في أودو (DESC)": s.DESC,
+                    "الاسم المختصر للطباعة (Short)": s.Short,
+                    "رقم المدينة": s.CityNo or "غير محدد",
+                    "اسم المدينة": s.city.CityName if s.city else "غير محدد",
+                    "المنطقة": s.city.branch.BranchName if s.city and s.city.branch else "عام",
+                })
+            st.dataframe(pd.DataFrame(sh_data), use_container_width=True)
+    
+            with st.expander("➕ إضافة معرض أو نقطة بيع جديدة:"):
+                with st.form("new_showroom_form"):
+                    new_no = st.text_input("كود المعرض (No): e.g. 160")
+                    new_desc = st.text_input("اسم نقطة البيع في أودو (DESC)")
+                    new_short = st.text_input("الاسم المختصر للطباعة (Short)")
+                    cities = db.query(City).order_by(City.CityNo.asc()).all()
+                    city_options = {f"{c.CityNo} - {c.CityName}": c.CityNo for c in cities}
+                    new_city = st.selectbox("المدينة:", options=list(city_options.keys()))
+    
+                    if st.form_submit_button("حفظ المعرض الجديد"):
+                        if not (new_no and new_desc and new_short):
+                            st.error("يرجى ملء كافة الحقول المطلوبة.")
+                        else:
+                            c_no = city_options[new_city]
+                            new_sh = Showroom(No=new_no.strip(), DESC=new_desc.strip(), Short=new_short.strip(), CityNo=c_no)
+                            try:
+                                db.add(new_sh)
+                                db.commit()
+                                st.success(f"✅ تم إضافة المعرض `{new_short}` بنجاح!")
+                                time.sleep(1)
+                                st.rerun()
+                            except Exception as e:
+                                db.rollback()
+                                st.error(f"❌ تعذر الحفظ: {e}")
+    
+        # 4. SEED / IMPORT OLD CLOSINGS
+        with sub_seed:
+            st.markdown("#### 📥 إدارة واستيراد أرشيف الإقفالات السابقة (tblOLD):")
+            total_old = db.query(OldClosing).count()
+            st.info(f"📊 إجمالي عدد الجلسات المؤرشفة والمعتمدة حالياً في قاعدة البيانات (`tbl_old`): **{total_old:,}** جلسة.")
+    
+            st.markdown("##### 1️⃣ رفع ملف إكسل أو CSV للأرشيف (مثل `qryExportOldDetailed.xlsx`):")
+            old_file = st.file_uploader(
+                "اختر ملف الإكسل المصدر من أكسيس أو أودو لتحديث جدول tblOLD:",
+                type=["xlsx", "xls", "csv"],
+                key="old_closings_uploader"
+            )
+            if old_file is not None:
+                if st.button("🚀 بدء استيراد وتحديث جدول tblOLD من الملف المرفوع"):
+                    try:
+                        with st.spinner("جاري استيراد الأرشيف وفحص السجلات الجديدة..."):
+                            stats = processor.import_old_closings_file(old_file, batch_id="FILE_UPLOAD_OLD")
+                            get_cached_system_stats.clear()
+                            st.success(
+                                f"✅ تم الانتهاء بنجاح! إجمالي السجلات في الملف: {stats['total_in_file']:,} | "
+                                f"تمت إضافة: {stats['new_added']:,} سجل جديد | "
+                                f"الموجود مسبقاً: {stats['already_existed']:,} | "
+                                f"الإجمالي الكلي الآن: {stats['final_total']:,}"
                             )
-                    if b.totals_pdf_blob:
-                        with c2:
-                            st.download_button(
-                                label="📥 التقرير الإجمالي (tot.pdf)",
-                                data=b.totals_pdf_blob,
-                                file_name=f"{b.report_date}tot.pdf",
-                                mime="application/pdf",
-                                key=f"dl_tot_{b.batch_id}"
-                            )
-                    if b.color_pdf_blob:
-                        with c3:
-                            st.download_button(
-                                label="📥 التقرير الرقابي (color.pdf)",
-                                data=b.color_pdf_blob,
-                                file_name=f"{b.report_date}color.pdf",
-                                mime="application/pdf",
-                                key=f"dl_col_{b.batch_id}"
-                            )
-
-    # 2. ROLLBACK LAST BATCH
-    with sub_rollback:
-        st.markdown("#### ⚠️ التراجع عن آخر دفعة معتمدة (Rollback Last Batch):")
-        st.warning(
-            "تتيح لك هذه الميزة التراجع عن آخر دفعة اعتمدتها، وحذف جلساتها من جدول `tbl_old`، "
-            "لكي تتمكن من إعادة قراءة بيانات اليوم وإضافة أي معرض كان متأخراً وإعادة استخراج التقرير."
-        )
-
-        last_batch = db.query(ReportBatch).filter(ReportBatch.is_rolled_back == False).order_by(ReportBatch.created_at.desc()).first()
-        if not last_batch:
-            st.info("لا توجد دفعات نشطة متاحة للتراجع.")
-        else:
-            st.write(f"• **آخر دفعة معتمدة:** `{last_batch.batch_id}`")
-            st.write(f"• **تاريخ التقرير:** {last_batch.report_date} | **عدد الجلسات:** {last_batch.sessions_count}")
-
-            confirm_rb = st.checkbox("أؤكد رغبتي في التراجع عن هذه الدفعة وإلغاء ترحيل جلساتها من tblOLD")
-            if st.button("🚨 إلغاء اعتماد الدفعة واسترجاع الجلسات", type="secondary", disabled=not confirm_rb):
-                try:
-                    db.query(OldClosing).filter(OldClosing.batch_id == last_batch.batch_id).delete()
-                    last_batch.is_rolled_back = True
+                            time.sleep(1.5)
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ خطأ أثناء الاستيراد: {e}")
+    
+            st.markdown("---")
+            st.markdown("##### 2️⃣ استيراد أرقام إقفالات نصية يدوية:")
+            pasted_text = st.text_area("أرقام الإقفالات (كل رقم في سطر مستقل مثل POS/57800):", height=120)
+            if st.button("استيراد الأرقام الملصقة إلى tblOLD"):
+                if pasted_text:
+                    lines_in = [x.strip() for x in pasted_text.splitlines() if x.strip()]
+                    added = 0
+                    for c_no in lines_in:
+                        exists = db.query(OldClosing).filter(OldClosing.closing_no == c_no).first()
+                        if not exists:
+                            db.add(OldClosing(closing_no=c_no, batch_id="MANUAL_IMPORT"))
+                            added += 1
                     db.commit()
                     get_cached_system_stats.clear()
-                    st.success(f"✅ تم التراجع عن الدفعة `{last_batch.batch_id}` بنجاح! يمكنك الآن إعادة إصدار التقرير.")
-                    time.sleep(2)
+                    st.success(f"✅ تم استيراد {added} رقم إقفال جديد إلى tblOLD بنجاح!")
+                    time.sleep(1)
                     st.rerun()
-                except Exception as e:
-                    db.rollback()
-                    st.error(f"❌ خطأ أثناء التراجع: {e}")
-
-    # 3. SHOWROOMS & CITIES MANAGEMENT
-    with sub_showrooms:
-        st.markdown("#### 🏢 قائمة المعارض ونقاط البيع المعتمدة (59 سجلاً):")
-        showrooms_list = db.query(Showroom).order_by(Showroom.No.asc()).all()
-        sh_data = []
-        for s in showrooms_list:
-            sh_data.append({
-                "الكود": s.No,
-                "اسم نقطة البيع في أودو (DESC)": s.DESC,
-                "الاسم المختصر للطباعة (Short)": s.Short,
-                "رقم المدينة": s.CityNo or "غير محدد",
-                "اسم المدينة": s.city.CityName if s.city else "غير محدد",
-                "المنطقة": s.city.branch.BranchName if s.city and s.city.branch else "عام",
-            })
-        st.dataframe(pd.DataFrame(sh_data), use_container_width=True)
-
-        with st.expander("➕ إضافة معرض أو نقطة بيع جديدة:"):
-            with st.form("new_showroom_form"):
-                new_no = st.text_input("كود المعرض (No): e.g. 160")
-                new_desc = st.text_input("اسم نقطة البيع في أودو (DESC)")
-                new_short = st.text_input("الاسم المختصر للطباعة (Short)")
-                cities = db.query(City).order_by(City.CityNo.asc()).all()
-                city_options = {f"{c.CityNo} - {c.CityName}": c.CityNo for c in cities}
-                new_city = st.selectbox("المدينة:", options=list(city_options.keys()))
-
-                if st.form_submit_button("حفظ المعرض الجديد"):
-                    if not (new_no and new_desc and new_short):
-                        st.error("يرجى ملء كافة الحقول المطلوبة.")
-                    else:
-                        c_no = city_options[new_city]
-                        new_sh = Showroom(No=new_no.strip(), DESC=new_desc.strip(), Short=new_short.strip(), CityNo=c_no)
-                        try:
-                            db.add(new_sh)
-                            db.commit()
-                            st.success(f"✅ تم إضافة المعرض `{new_short}` بنجاح!")
-                            time.sleep(1)
-                            st.rerun()
-                        except Exception as e:
-                            db.rollback()
-                            st.error(f"❌ تعذر الحفظ: {e}")
-
-    # 4. SEED / IMPORT OLD CLOSINGS
-    with sub_seed:
-        st.markdown("#### 📥 إدارة واستيراد أرشيف الإقفالات السابقة (tblOLD):")
-        total_old = db.query(OldClosing).count()
-        st.info(f"📊 إجمالي عدد الجلسات المؤرشفة والمعتمدة حالياً في قاعدة البيانات (`tbl_old`): **{total_old:,}** جلسة.")
-
-        st.markdown("##### 1️⃣ رفع ملف إكسل أو CSV للأرشيف (مثل `qryExportOldDetailed.xlsx`):")
-        old_file = st.file_uploader(
-            "اختر ملف الإكسل المصدر من أكسيس أو أودو لتحديث جدول tblOLD:",
-            type=["xlsx", "xls", "csv"],
-            key="old_closings_uploader"
-        )
-        if old_file is not None:
-            if st.button("🚀 بدء استيراد وتحديث جدول tblOLD من الملف المرفوع"):
-                try:
-                    with st.spinner("جاري استيراد الأرشيف وفحص السجلات الجديدة..."):
-                        stats = processor.import_old_closings_file(old_file, batch_id="FILE_UPLOAD_OLD")
-                        get_cached_system_stats.clear()
-                        st.success(
-                            f"✅ تم الانتهاء بنجاح! إجمالي السجلات في الملف: {stats['total_in_file']:,} | "
-                            f"تمت إضافة: {stats['new_added']:,} سجل جديد | "
-                            f"الموجود مسبقاً: {stats['already_existed']:,} | "
-                            f"الإجمالي الكلي الآن: {stats['final_total']:,}"
-                        )
-                        time.sleep(1.5)
-                        st.rerun()
-                except Exception as e:
-                    st.error(f"❌ خطأ أثناء الاستيراد: {e}")
-
-        st.markdown("---")
-        st.markdown("##### 2️⃣ استيراد أرقام إقفالات نصية يدوية:")
-        pasted_text = st.text_area("أرقام الإقفالات (كل رقم في سطر مستقل مثل POS/57800):", height=120)
-        if st.button("استيراد الأرقام الملصقة إلى tblOLD"):
-            if pasted_text:
-                lines_in = [x.strip() for x in pasted_text.splitlines() if x.strip()]
-                added = 0
-                for c_no in lines_in:
-                    exists = db.query(OldClosing).filter(OldClosing.closing_no == c_no).first()
-                    if not exists:
-                        db.add(OldClosing(closing_no=c_no, batch_id="MANUAL_IMPORT"))
-                        added += 1
-                db.commit()
-                get_cached_system_stats.clear()
-                st.success(f"✅ تم استيراد {added} رقم إقفال جديد إلى tblOLD بنجاح!")
-                time.sleep(1)
-                st.rerun()
-
-    # 5. DEVICE SECURITY & CLOUD RESILIENCE
-    with sub_security:
-        st.markdown("#### 🛡️ أمان الأجهزة المصرح لها والربط السحابي المقاوم لانقطاع الكهرباء:")
-
-        # Section A: Device Security & Machine ID
-        st.markdown("##### 1️⃣ بيانات ترخيص هذا الجهاز (Hardware Licensing):")
-        cur_mid = get_machine_id()
-        st.info(f"• **كود بصمة العتاد الصلبة (Machine ID):** `{cur_mid}`")
-        st.write("• **حالة التفعيل:** 🟢 هذا الجهاز مرخص ومسجل في منظومة حماية شركة العسلي التجارية.")
-        st.write("• **التحكم المركزي:** يمكنك إدارة هذا الجهاز وتوليد مفاتيحه أو حظره عن بعد عبر برنامج `Keygen_Admin.exe`.")
-
-        col_sec1, col_sec2 = st.columns(2)
-        with col_sec1:
-            if st.button("🔄 فحص ومزامنة حالة الجهاز مع Odoo الآن", use_container_width=True):
-                from security_gate import fetch_device_status_from_odoo
-                st_stat = fetch_device_status_from_odoo(cur_mid)
-                st.session_state.odoo_device_status = st_stat
-                st.success(f"حالة الجهاز في سجل أودو المركزي: **{st_stat.upper()}**")
-        with col_sec2:
-            if st.button("⚠️ إلغاء تفعيل هذا الجهاز (Deactivate Device)", use_container_width=True, type="secondary"):
-                from security_gate import deactivate_device
-                deactivate_device()
-                st.warning("تم إلغاء تفعيل هذا الجهاز. جاري إعادة القفل...")
-                time.sleep(1)
-                st.rerun()
-
-        st.markdown("---")
-
-        # Section B: Cloud Database Resilience
-        st.markdown("##### 2️⃣ الربط السحابي وقاعدة البيانات المقاومة لانقطاع الكهرباء (Cloud Database):")
-        st.write(
-            "لحماية عملك من انقطاع الكهرباء أو تعطل أجهزة الشركة، يمكنك تشغيل البرنامج من أي جهاز (لابتوب أو منزل) "
-            "مباشرة مع قاعدة بيانات سحابية مشفرة (مثل **Supabase** أو **Neon PostgreSQL**) دون الحاجة لوجود سيرفر محلي."
-        )
-
-        db_stat = get_database_status_info()
-        if db_stat["is_cloud"]:
-            st.success(f"🟢 النظام متصل حالياً بقاعدة بيانات سحابية مركزية مشفرة: **{db_stat['type']}**\n\n📌 المضيف السحابي: `{db_stat['url_masked']}`")
-            st.info("✨ ميزة الاستقلالية مفعلة: يمكنك الآن تشغيل البرنامج من أي جهاز حاسوب أو لابتوب مصرح به وستظهر نفس البيانات وآخر إقفالات ومبيعات دون تكرار أو تعارض نهائياً.")
-            if st.button("🔄 التبديل مؤقتاً إلى القاعدة المحلية (Offline Mode)"):
-                env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-                if os.path.exists(env_file):
-                    with open(env_file, "r", encoding="utf-8") as f:
-                        content = f.read()
-                    content = content.replace('DATABASE_URL=', '# DATABASE_URL=')
-                    with open(env_file, "w", encoding="utf-8") as f:
-                        f.write(content)
-                st.success("تم التبديل للقاعدة المحلية. جاري إعادة التحميل...")
-                st.rerun()
-        else:
-            st.warning(f"🟡 النظام يعمل حالياً على قاعدة بيانات محلية مستقلة: **{db_stat['type']}**.")
-
-        with st.expander("🚀 أداة ترحيل الأرشيف والربط السحابي (Cloud Database Connection & Migration):"):
-            st.write("أدخل رابط قاعدة البيانات السحابية (PostgreSQL / Supabase) لترحيل الـ 22,867 جلسة أو تفعيل الربط السحابي لهذا الجهاز:")
-            target_pg_url = st.text_input(
-                "رابط اتصال PostgreSQL السحابي المشفر:",
-                placeholder="postgresql://postgres:password@db.supabase.co:5432/postgres?sslmode=require",
-                type="password"
+    
+        # 5. DEVICE SECURITY & CLOUD RESILIENCE
+        with sub_security:
+            st.markdown("#### 🛡️ أمان الأجهزة المصرح لها والربط السحابي المقاوم لانقطاع الكهرباء:")
+    
+            # Section A: Device Security & Machine ID
+            st.markdown("##### 1️⃣ بيانات ترخيص هذا الجهاز (Hardware Licensing):")
+            cur_mid = get_machine_id()
+            st.info(f"• **كود بصمة العتاد الصلبة (Machine ID):** `{cur_mid}`")
+            st.write("• **حالة التفعيل:** 🟢 هذا الجهاز مرخص ومسجل في منظومة حماية شركة العسلي التجارية.")
+            st.write("• **التحكم المركزي:** يمكنك إدارة هذا الجهاز وتوليد مفاتيحه أو حظره عن بعد عبر برنامج `Keygen_Admin.exe`.")
+    
+            col_sec1, col_sec2 = st.columns(2)
+            with col_sec1:
+                if st.button("🔄 فحص ومزامنة حالة الجهاز مع Odoo الآن", use_container_width=True):
+                    from security_gate import fetch_device_status_from_odoo
+                    st_stat = fetch_device_status_from_odoo(cur_mid)
+                    st.session_state.odoo_device_status = st_stat
+                    st.success(f"حالة الجهاز في سجل أودو المركزي: **{st_stat.upper()}**")
+            with col_sec2:
+                if st.button("⚠️ إلغاء تفعيل هذا الجهاز (Deactivate Device)", use_container_width=True, type="secondary"):
+                    from security_gate import deactivate_device
+                    deactivate_device()
+                    st.warning("تم إلغاء تفعيل هذا الجهاز. جاري إعادة القفل...")
+                    time.sleep(1)
+                    st.rerun()
+    
+            st.markdown("---")
+    
+            # Section B: Cloud Database Resilience
+            st.markdown("##### 2️⃣ الربط السحابي وقاعدة البيانات المقاومة لانقطاع الكهرباء (Cloud Database):")
+            st.write(
+                "لحماية عملك من انقطاع الكهرباء أو تعطل أجهزة الشركة، يمكنك تشغيل البرنامج من أي جهاز (لابتوب أو منزل) "
+                "مباشرة مع قاعدة بيانات سحابية مشفرة (مثل **Supabase** أو **Neon PostgreSQL**) دون الحاجة لوجود سيرفر محلي."
             )
-            col_m1, col_m2 = st.columns(2)
-            with col_m1:
-                if st.button("🚀 بدء ترحيل الأرشيف والجداول إلى السحابة", type="primary"):
-                    if not target_pg_url:
-                        st.error("يرجى إدخال رابط اتصال PostgreSQL.")
-                    else:
-                        with st.spinner("جاري ترحيل كافة الجداول والأرشيف السحابي... قد يستغرق ذلك دقيقة واحدة:"):
-                            try:
-                                from migrate_to_cloud_db import migrate_sqlite_to_cloud_postgresql, clean_pg_url
-                                ok = migrate_sqlite_to_cloud_postgresql(target_pg_url)
-                                if ok:
-                                    cleaned = clean_pg_url(target_pg_url)
-                                    env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-                                    with open(env_file, "w", encoding="utf-8") as f:
-                                        f.write(f'# Daily Sales Cloud App — Configuration\nAPP_PASSWORD=assali2026\nDATABASE_URL="{cleaned}"\n')
-                                    st.success("✅ تم ترحيل كافة الجداول والأرشيف بنجاح تام، وتم ربط البرنامج بالسحابة فوراً!")
-                                    st.rerun()
-                                else:
-                                    st.error("❌ فشل الترحيل، يرجى التأكد من صحة الرابط والاتصال بالإنترنت.")
-                            except Exception as ex:
-                                st.error(f"❌ خطأ أثناء الترحيل: {ex}")
-            with col_m2:
-                if st.button("🔗 حفظ الرابط والاتصال بالسحابة مباشرة"):
-                    if not target_pg_url:
-                        st.error("يرجى إدخال رابط اتصال PostgreSQL.")
-                    else:
-                        from database import clean_pg_url
-                        cleaned = clean_pg_url(target_pg_url)
-                        env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    
+            db_stat = get_database_status_info()
+            if db_stat["is_cloud"]:
+                st.success(f"🟢 النظام متصل حالياً بقاعدة بيانات سحابية مركزية مشفرة: **{db_stat['type']}**\n\n📌 المضيف السحابي: `{db_stat['url_masked']}`")
+                st.info("✨ ميزة الاستقلالية مفعلة: يمكنك الآن تشغيل البرنامج من أي جهاز حاسوب أو لابتوب مصرح به وستظهر نفس البيانات وآخر إقفالات ومبيعات دون تكرار أو تعارض نهائياً.")
+                if st.button("🔄 التبديل مؤقتاً إلى القاعدة المحلية (Offline Mode)"):
+                    env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+                    if os.path.exists(env_file):
+                        with open(env_file, "r", encoding="utf-8") as f:
+                            content = f.read()
+                        content = content.replace('DATABASE_URL=', '# DATABASE_URL=')
                         with open(env_file, "w", encoding="utf-8") as f:
-                            f.write(f'# Daily Sales Cloud App — Configuration\nAPP_PASSWORD=assali2026\nDATABASE_URL="{cleaned}"\n')
-                        st.success("✅ تم حفظ الرابط وربط البرنامج بالسحابة بنجاح!")
-                        st.rerun()
-
-    db.close()
+                            f.write(content)
+                    st.success("تم التبديل للقاعدة المحلية. جاري إعادة التحميل...")
+                    st.rerun()
+            else:
+                st.warning(f"🟡 النظام يعمل حالياً على قاعدة بيانات محلية مستقلة: **{db_stat['type']}**.")
+    
+            with st.expander("🚀 أداة ترحيل الأرشيف والربط السحابي (Cloud Database Connection & Migration):"):
+                st.write("أدخل رابط قاعدة البيانات السحابية (PostgreSQL / Supabase) لترحيل الـ 22,867 جلسة أو تفعيل الربط السحابي لهذا الجهاز:")
+                target_pg_url = st.text_input(
+                    "رابط اتصال PostgreSQL السحابي المشفر:",
+                    placeholder="postgresql://postgres:password@db.supabase.co:5432/postgres?sslmode=require",
+                    type="password"
+                )
+                col_m1, col_m2 = st.columns(2)
+                with col_m1:
+                    if st.button("🚀 بدء ترحيل الأرشيف والجداول إلى السحابة", type="primary"):
+                        if not target_pg_url:
+                            st.error("يرجى إدخال رابط اتصال PostgreSQL.")
+                        else:
+                            with st.spinner("جاري ترحيل كافة الجداول والأرشيف السحابي... قد يستغرق ذلك دقيقة واحدة:"):
+                                try:
+                                    from migrate_to_cloud_db import migrate_sqlite_to_cloud_postgresql, clean_pg_url
+                                    ok = migrate_sqlite_to_cloud_postgresql(target_pg_url)
+                                    if ok:
+                                        cleaned = clean_pg_url(target_pg_url)
+                                        env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+                                        with open(env_file, "w", encoding="utf-8") as f:
+                                            f.write(f'# Daily Sales Cloud App — Configuration\nAPP_PASSWORD=assali2026\nDATABASE_URL="{cleaned}"\n')
+                                        st.success("✅ تم ترحيل كافة الجداول والأرشيف بنجاح تام، وتم ربط البرنامج بالسحابة فوراً!")
+                                        st.rerun()
+                                    else:
+                                        st.error("❌ فشل الترحيل، يرجى التأكد من صحة الرابط والاتصال بالإنترنت.")
+                                except Exception as ex:
+                                    st.error(f"❌ خطأ أثناء الترحيل: {ex}")
+                with col_m2:
+                    if st.button("🔗 حفظ الرابط والاتصال بالسحابة مباشرة"):
+                        if not target_pg_url:
+                            st.error("يرجى إدخال رابط اتصال PostgreSQL.")
+                        else:
+                            from database import clean_pg_url
+                            cleaned = clean_pg_url(target_pg_url)
+                            env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+                            with open(env_file, "w", encoding="utf-8") as f:
+                                f.write(f'# Daily Sales Cloud App — Configuration\nAPP_PASSWORD=assali2026\nDATABASE_URL="{cleaned}"\n')
+                            st.success("✅ تم حفظ الرابط وربط البرنامج بالسحابة بنجاح!")
+                            st.rerun()
+    
+        db.close()

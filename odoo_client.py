@@ -975,3 +975,589 @@ class OdooClient:
             'rows': rows,
             'grand_totals': grand_totals
         }
+
+    # =========================================================================
+    # MULTI-DIMENSIONAL REPORTING: SUPPLIERS (SG0), CATEGORIES & CROSS-TABS
+    # =========================================================================
+    def get_vendor_tags_mapping(self) -> Dict[int, str]:
+        """
+        Fetches all product.tag records starting with 'SG0' and extracts vendor name after '-'.
+        Caches result in memory for ultra-fast lookups.
+        """
+        if getattr(self, "_vendor_tags_cache", None) is not None:
+            return self._vendor_tags_cache
+
+        if not self.is_connected() and not self.connect():
+            return {}
+
+        try:
+            tags = self._models.execute_kw(
+                self.db, self.uid, self.password,
+                'product.tag', 'search_read',
+                [[('name', '=like', 'SG0%')]],
+                {'fields': ['id', 'name']}
+            )
+            mapping = {}
+            for t in tags:
+                t_name = t.get('name', '').strip()
+                parts = t_name.split('-', 1)
+                vendor_name = parts[1].strip() if len(parts) > 1 else t_name
+                mapping[t['id']] = vendor_name
+            self._vendor_tags_cache = mapping
+            return mapping
+        except Exception as e:
+            print(f"[OdooClient] get_vendor_tags_mapping error: {e}")
+            return {}
+
+    def get_products_metadata(self, product_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+        """
+        Fetches and caches product metadata: display_name, barcode, categ_id, and SG0 vendor.
+        """
+        if not hasattr(self, "_product_meta_cache"):
+            self._product_meta_cache = {}
+
+        needed = [pid for pid in product_ids if pid not in self._product_meta_cache]
+        if not needed:
+            return {pid: self._product_meta_cache[pid] for pid in product_ids if pid in self._product_meta_cache}
+
+        if not self.is_connected() and not self.connect():
+            return {}
+
+        vendor_tags = self.get_vendor_tags_mapping()
+
+        # Batch fetch in chunks of 1000
+        for i in range(0, len(needed), 1000):
+            batch = needed[i:i + 1000]
+            try:
+                records = self._models.execute_kw(
+                    self.db, self.uid, self.password,
+                    'product.product', 'read',
+                    [batch],
+                    {'fields': ['id', 'display_name', 'default_code', 'barcode', 'categ_id', 'product_tag_ids']}
+                )
+                for r in records:
+                    pid = r['id']
+                    # Category extraction
+                    cat = r.get('categ_id')
+                    cat_name = cat[1].strip() if isinstance(cat, (list, tuple)) and len(cat) > 1 else "بدون تصنيف"
+
+                    # Vendor extraction from SG0 tags
+                    tag_ids = r.get('product_tag_ids', []) or []
+                    vendor = "بدون تاغ"
+                    for tid in tag_ids:
+                        if tid in vendor_tags:
+                            vendor = vendor_tags[tid]
+                            break
+
+                    self._product_meta_cache[pid] = {
+                        'id': pid,
+                        'name': r.get('display_name', ''),
+                        'code': r.get('default_code', ''),
+                        'barcode': r.get('barcode', ''),
+                        'category': cat_name,
+                        'vendor': vendor
+                    }
+            except Exception as e:
+                print(f"[OdooClient] get_products_metadata batch error: {e}")
+
+        return {pid: self._product_meta_cache[pid] for pid in product_ids if pid in self._product_meta_cache}
+
+    def fetch_multidim_period_sales(
+        self,
+        start_date: str,
+        end_date: str,
+        primary_dim: str = "vendor",           # "vendor" or "category"
+        secondary_dim: Optional[str] = "category", # "category", "vendor", or None
+        showroom_config_id: Optional[int] = None,
+        title: str = "تقرير مبيعات تحليلي متعدد الأبعاد"
+    ) -> Dict[str, Any]:
+        """
+        Fetches and aggregates sales lines by Primary and Secondary dimensions:
+        Dimensions:
+          - 'vendor': المورد (من تاغات SG0 أو 'بدون تاغ')
+          - 'category': نوع البضاعة (Product Category أو 'بدون تصنيف')
+        """
+        s_y, s_m, s_d = [int(x) for x in start_date.split('-')]
+        e_y, e_m, e_d = [int(x) for x in end_date.split('-')]
+
+        start_dt_utc = datetime(s_y, s_m, s_d, 0, 0, 0, tzinfo=KSA_OFFSET).astimezone(timezone.utc)
+        end_dt_utc = datetime(e_y, e_m, e_d, 23, 59, 59, tzinfo=KSA_OFFSET).astimezone(timezone.utc)
+        start_str = start_dt_utc.strftime("%Y-%m-%d %H:%M:%S")
+        end_str = end_dt_utc.strftime("%Y-%m-%d %H:%M:%S")
+
+        if not self.is_connected() and not self.connect():
+            raise ConnectionError("Could not connect to Odoo server.")
+
+        domain = [
+            ('order_id.state', 'in', ['paid', 'done', 'invoiced']),
+            ('order_id.date_order', '>=', start_str),
+            ('order_id.date_order', '<=', end_str)
+        ]
+        if showroom_config_id:
+            domain.append(('order_id.config_id', '=', showroom_config_id))
+
+        # 1. Single fast read_group on pos.order.line grouped by product_id
+        res = self._models.execute_kw(
+            self.db, self.uid, self.password,
+            'pos.order.line', 'read_group',
+            [domain],
+            {
+                'fields': ['product_id', 'qty:sum', 'price_subtotal:sum', 'price_subtotal_incl:sum'],
+                'groupby': ['product_id'],
+                'lazy': False
+            }
+        )
+
+        pids = [r['product_id'][0] for r in res if r.get('product_id')]
+        meta_map = self.get_products_metadata(pids)
+
+        # 2. Multi-dimensional aggregation
+        groups: Dict[str, Dict[str, Any]] = {}
+        total_net = 0.0
+        total_gross = 0.0
+        total_tax = 0.0
+        total_qty = 0.0
+
+        for r in res:
+            if not r.get('product_id'):
+                continue
+            pid = r['product_id'][0]
+            meta = meta_map.get(pid, {'category': 'بدون تصنيف', 'vendor': 'بدون تاغ', 'name': r['product_id'][1]})
+
+            qty = float(r.get('qty', 0.0) or 0.0)
+            net = float(r.get('price_subtotal', 0.0) or 0.0)
+            gross = float(r.get('price_subtotal_incl', 0.0) or 0.0)
+            tax = gross - net
+
+            total_net += net
+            total_gross += gross
+            total_tax += tax
+            total_qty += qty
+
+            prim_val = meta.get(primary_dim, 'غير محدد')
+            sec_val = meta.get(secondary_dim, 'غير محدد') if secondary_dim else None
+
+            if prim_val not in groups:
+                groups[prim_val] = {
+                    'name': prim_val,
+                    'net': 0.0,
+                    'gross': 0.0,
+                    'tax': 0.0,
+                    'qty': 0.0,
+                    'items_count': 0,
+                    'sub_groups': {}
+                }
+
+            groups[prim_val]['net'] += net
+            groups[prim_val]['gross'] += gross
+            groups[prim_val]['tax'] += tax
+            groups[prim_val]['qty'] += qty
+            groups[prim_val]['items_count'] += 1
+
+            if sec_val:
+                subs = groups[prim_val]['sub_groups']
+                if sec_val not in subs:
+                    subs[sec_val] = {
+                        'name': sec_val,
+                        'net': 0.0,
+                        'gross': 0.0,
+                        'tax': 0.0,
+                        'qty': 0.0,
+                        'items_count': 0
+                    }
+                subs[sec_val]['net'] += net
+                subs[sec_val]['gross'] += gross
+                subs[sec_val]['tax'] += tax
+                subs[sec_val]['qty'] += qty
+                subs[sec_val]['items_count'] += 1
+
+        # 3. Format rows and calculate percentages
+        rows = []
+        for name, g in groups.items():
+            g_net = round(g['net'], 2)
+            g_gross = round(g['gross'], 2)
+            g_tax = round(g['tax'], 2)
+            g_qty = round(g['qty'], 2)
+            share_pct = round((g_net / total_net * 100.0), 2) if total_net > 0 else 0.0
+
+            sub_rows = []
+            for s_name, s in g['sub_groups'].items():
+                s_net = round(s['net'], 2)
+                s_share = round((s_net / g_net * 100.0), 2) if g_net > 0 else 0.0
+                sub_rows.append({
+                    'name': s_name,
+                    'net': s_net,
+                    'gross': round(s['gross'], 2),
+                    'tax': round(s['tax'], 2),
+                    'qty': round(s['qty'], 2),
+                    'items_count': s['items_count'],
+                    'share_pct': s_share
+                })
+            sub_rows.sort(key=lambda x: x['net'], reverse=True)
+
+            rows.append({
+                'name': name,
+                'net': g_net,
+                'gross': g_gross,
+                'tax': g_tax,
+                'qty': g_qty,
+                'items_count': g['items_count'],
+                'share_pct': share_pct,
+                'sub_rows': sub_rows
+            })
+
+        # Sort primary rows descending by net sales
+        rows.sort(key=lambda x: x['net'], reverse=True)
+        for idx, r in enumerate(rows, start=1):
+            r['seq'] = idx
+
+        return {
+            'title': title,
+            'start_date': start_date,
+            'end_date': end_date,
+            'primary_dim': primary_dim,
+            'secondary_dim': secondary_dim,
+            'rows': rows,
+            'grand_totals': {
+                'net': round(total_net, 2),
+                'gross': round(total_gross, 2),
+                'tax': round(total_tax, 2),
+                'qty': round(total_qty, 2),
+                'groups_count': len(rows),
+                'products_count': len(pids)
+            }
+        }
+
+    def fetch_multidim_comparative_sales(
+        self,
+        current_period: Dict[str, Any],
+        previous_period: Dict[str, Any],
+        dimension: str = "vendor",  # "vendor" or "category"
+        showroom_config_id: Optional[int] = None,
+        title: str = "تقرير مقارنة تحليلي"
+    ) -> Dict[str, Any]:
+        """
+        Compares two distinct periods for a specific dimension (Vendor or Category).
+        Calculates variance, financial difference, and growth percentages.
+        """
+        curr = self.fetch_multidim_period_sales(
+            start_date=current_period['start_date'],
+            end_date=current_period['end_date'],
+            primary_dim=dimension,
+            secondary_dim=None,
+            showroom_config_id=showroom_config_id
+        )
+        prev = self.fetch_multidim_period_sales(
+            start_date=previous_period['start_date'],
+            end_date=previous_period['end_date'],
+            primary_dim=dimension,
+            secondary_dim=None,
+            showroom_config_id=showroom_config_id
+        )
+
+        curr_map = {r['name']: r for r in curr['rows']}
+        prev_map = {r['name']: r for r in prev['rows']}
+        all_keys = set(curr_map.keys()) | set(prev_map.keys())
+
+        rows = []
+        for k in all_keys:
+            c = curr_map.get(k)
+            p = prev_map.get(k)
+            c_net = c['net'] if c else 0.0
+            p_net = p['net'] if p else 0.0
+            c_qty = c['qty'] if c else 0.0
+            p_qty = p['qty'] if p else 0.0
+
+            diff_net = round(c_net - p_net, 2)
+            growth_pct = round((diff_net / p_net) * 100.0, 2) if p_net > 0 else (100.0 if c_net > 0 else 0.0)
+
+            rows.append({
+                'name': k,
+                'current_net': c_net,
+                'previous_net': p_net,
+                'current_qty': c_qty,
+                'previous_qty': p_qty,
+                'diff_net': diff_net,
+                'growth_pct': growth_pct
+            })
+
+        rows.sort(key=lambda x: x['current_net'], reverse=True)
+        for idx, r in enumerate(rows, start=1):
+            r['seq'] = idx
+
+        tot_curr = round(sum(r['current_net'] for r in rows), 2)
+        tot_prev = round(sum(r['previous_net'] for r in rows), 2)
+        tot_diff = round(tot_curr - tot_prev, 2)
+        tot_growth = round((tot_diff / tot_prev) * 100.0, 2) if tot_prev > 0 else 0.0
+
+        return {
+            'title': title,
+            'dimension': dimension,
+            'current_label': current_period.get('label', 'الفترة الحالية'),
+            'previous_label': previous_period.get('label', 'فترة المقارنة'),
+            'current_range': f"{current_period['start_date']} إلى {current_period['end_date']}",
+            'previous_range': f"{previous_period['start_date']} إلى {previous_period['end_date']}",
+            'rows': rows,
+            'grand_totals': {
+                'current_net': tot_curr,
+                'previous_net': tot_prev,
+                'diff_net': tot_diff,
+                'growth_pct': tot_growth,
+                'entities_count': len(rows)
+            }
+        }
+
+    def fetch_showroom_vendor_matrix(
+        self,
+        start_date: str,
+        end_date: str,
+        showroom_resolver: Any = None
+    ) -> Dict[str, Any]:
+        """
+        Builds a cross-tabulation matrix of Showrooms (Rows) × Vendors (Columns) + Totals.
+        Essential for executive understanding of showroom vendor mix.
+        """
+        import re
+        s_y, s_m, s_d = [int(x) for x in start_date.split('-')]
+        e_y, e_m, e_d = [int(x) for x in end_date.split('-')]
+
+        start_dt_utc = datetime(s_y, s_m, s_d, 0, 0, 0, tzinfo=KSA_OFFSET).astimezone(timezone.utc)
+        end_dt_utc = datetime(e_y, e_m, e_d, 23, 59, 59, tzinfo=KSA_OFFSET).astimezone(timezone.utc)
+        start_str = start_dt_utc.strftime("%Y-%m-%d %H:%M:%S")
+        end_str = end_dt_utc.strftime("%Y-%m-%d %H:%M:%S")
+
+        if not self.is_connected() and not self.connect():
+            raise ConnectionError("Could not connect to Odoo server.")
+
+        # 1. Fetch all POS configs
+        cfgs = self._models.execute_kw(
+            self.db, self.uid, self.password,
+            'pos.config', 'search_read',
+            [[]],
+            {'fields': ['id', 'name']}
+        )
+
+        vendor_tags = self.get_vendor_tags_mapping()
+        vendor_names = sorted(list(set(vendor_tags.values()))) + ["بدون تاغ"]
+
+        # 2. Query each showroom
+        matrix_rows = []
+        vendor_totals = {v: 0.0 for v in vendor_names}
+        company_grand_net = 0.0
+
+        for cfg in cfgs:
+            cfg_id = cfg['id']
+            cfg_name = cfg['name']
+
+            # Match code
+            m = re.findall(r'\b(1\d\d)\b', cfg_name)
+            code = m[0] if m else None
+
+            sh = None
+            if showroom_resolver:
+                if code and f"NO_{code}" in showroom_resolver.mapping:
+                    sh = showroom_resolver.mapping[f"NO_{code}"]
+                else:
+                    sh = showroom_resolver.resolve(cfg_name)
+                if sh and not code:
+                    code = sh.No
+
+            if not code:
+                continue
+
+            short = sh.Short if sh else cfg_name
+            sh_display = f"معرض {short}" if "معرض" not in short else short
+
+            domain = [
+                ('order_id.state', 'in', ['paid', 'done', 'invoiced']),
+                ('order_id.date_order', '>=', start_str),
+                ('order_id.date_order', '<=', end_str),
+                ('order_id.config_id', '=', cfg_id)
+            ]
+
+            lines = self._models.execute_kw(
+                self.db, self.uid, self.password,
+                'pos.order.line', 'read_group',
+                [domain],
+                {'fields': ['product_id', 'price_subtotal:sum'], 'groupby': ['product_id'], 'lazy': False}
+            )
+
+            if not lines:
+                continue
+
+            pids = [l['product_id'][0] for l in lines if l.get('product_id')]
+            meta = self.get_products_metadata(pids)
+
+            sh_vendors = {v: 0.0 for v in vendor_names}
+            sh_net = 0.0
+
+            for l in lines:
+                if not l.get('product_id'):
+                    continue
+                pid = l['product_id'][0]
+                p_net = float(l.get('price_subtotal', 0.0) or 0.0)
+                v = meta.get(pid, {}).get('vendor', 'بدون تاغ')
+                sh_vendors[v] = sh_vendors.get(v, 0.0) + p_net
+                sh_net += p_net
+
+            row_data = {
+                'code': code,
+                'showroom': sh_display,
+                'total_net': round(sh_net, 2)
+            }
+            for v in vendor_names:
+                v_amt = round(sh_vendors.get(v, 0.0), 2)
+                row_data[v] = v_amt
+                vendor_totals[v] += v_amt
+
+            company_grand_net += sh_net
+            matrix_rows.append(row_data)
+
+        # Sort matrix rows by total_net descending
+        matrix_rows.sort(key=lambda x: x['total_net'], reverse=True)
+        for idx, r in enumerate(matrix_rows, start=1):
+            r['seq'] = idx
+
+        # Column totals
+        vendor_totals_rounded = {v: round(vendor_totals[v], 2) for v in vendor_names}
+
+        return {
+            'start_date': start_date,
+            'end_date': end_date,
+            'vendor_names': vendor_names,
+            'rows': matrix_rows,
+            'vendor_totals': vendor_totals_rounded,
+            'grand_total_net': round(company_grand_net, 2)
+        }
+
+    def fetch_pareto_abc_analysis(
+        self,
+        start_date: str,
+        end_date: str,
+        entity_type: str = "product",  # "product", "vendor", or "category"
+        showroom_config_id: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Performs Pareto ABC Revenue Classification:
+          - Class A: High-value contributors generating the top 80% of revenue.
+          - Class B: Moderate contributors generating the next 15% (80% to 95%).
+          - Class C: Low-value long-tail contributors generating the final 5% (95% to 100%).
+        """
+        s_y, s_m, s_d = [int(x) for x in start_date.split('-')]
+        e_y, e_m, e_d = [int(x) for x in end_date.split('-')]
+
+        start_dt_utc = datetime(s_y, s_m, s_d, 0, 0, 0, tzinfo=KSA_OFFSET).astimezone(timezone.utc)
+        end_dt_utc = datetime(e_y, e_m, e_d, 23, 59, 59, tzinfo=KSA_OFFSET).astimezone(timezone.utc)
+        start_str = start_dt_utc.strftime("%Y-%m-%d %H:%M:%S")
+        end_str = end_dt_utc.strftime("%Y-%m-%d %H:%M:%S")
+
+        if not self.is_connected() and not self.connect():
+            raise ConnectionError("Could not connect to Odoo server.")
+
+        domain = [
+            ('order_id.state', 'in', ['paid', 'done', 'invoiced']),
+            ('order_id.date_order', '>=', start_str),
+            ('order_id.date_order', '<=', end_str)
+        ]
+        if showroom_config_id:
+            domain.append(('order_id.config_id', '=', showroom_config_id))
+
+        res = self._models.execute_kw(
+            self.db, self.uid, self.password,
+            'pos.order.line', 'read_group',
+            [domain],
+            {
+                'fields': ['product_id', 'qty:sum', 'price_subtotal:sum'],
+                'groupby': ['product_id'],
+                'lazy': False
+            }
+        )
+
+        pids = [r['product_id'][0] for r in res if r.get('product_id')]
+        meta = self.get_products_metadata(pids)
+
+        # Aggregate based on entity_type
+        agg: Dict[str, Dict[str, Any]] = {}
+        total_revenue = 0.0
+
+        for r in res:
+            if not r.get('product_id'):
+                continue
+            pid = r['product_id'][0]
+            m = meta.get(pid, {})
+            net = float(r.get('price_subtotal', 0.0) or 0.0)
+            qty = float(r.get('qty', 0.0) or 0.0)
+            total_revenue += net
+
+            if entity_type == "product":
+                key = m.get('name') or r['product_id'][1]
+                code = m.get('code') or ''
+                cat = m.get('category', 'بدون تصنيف')
+                vend = m.get('vendor', 'بدون تاغ')
+            elif entity_type == "vendor":
+                key = m.get('vendor', 'بدون تاغ')
+                code = ''
+                cat = ''
+                vend = key
+            else:  # category
+                key = m.get('category', 'بدون تصنيف')
+                code = ''
+                cat = key
+                vend = ''
+
+            if key not in agg:
+                agg[key] = {
+                    'name': key,
+                    'code': code,
+                    'category': cat,
+                    'vendor': vend,
+                    'net': 0.0,
+                    'qty': 0.0
+                }
+            agg[key]['net'] += net
+            agg[key]['qty'] += qty
+
+        # Sort descending by net revenue
+        sorted_items = sorted(agg.values(), key=lambda x: x['net'], reverse=True)
+
+        # Calculate cumulative % and assign class A, B, C
+        running_sum = 0.0
+        class_a_count = 0
+        class_b_count = 0
+        class_c_count = 0
+
+        for idx, item in enumerate(sorted_items, start=1):
+            item['seq'] = idx
+            running_sum += item['net']
+            cum_pct = (running_sum / total_revenue * 100.0) if total_revenue > 0 else 0.0
+            item['cum_pct'] = round(cum_pct, 2)
+            item['net'] = round(item['net'], 2)
+            item['qty'] = round(item['qty'], 2)
+
+            if cum_pct <= 80.0 or idx == 1:
+                item['abc_class'] = 'A'
+                item['class_desc'] = 'عالي الأهمية (Top 80%)'
+                class_a_count += 1
+            elif cum_pct <= 95.0:
+                item['abc_class'] = 'B'
+                item['class_desc'] = 'متوسط الأهمية (15%)'
+                class_b_count += 1
+            else:
+                item['abc_class'] = 'C'
+                item['class_desc'] = 'منخفض الأهمية (5%)'
+                class_c_count += 1
+
+        return {
+            'start_date': start_date,
+            'end_date': end_date,
+            'entity_type': entity_type,
+            'total_revenue': round(total_revenue, 2),
+            'items': sorted_items,
+            'summary': {
+                'total_items': len(sorted_items),
+                'class_a': class_a_count,
+                'class_b': class_b_count,
+                'class_c': class_c_count,
+            }
+        }
+

@@ -29,6 +29,10 @@ def parse_date_value(val: Any) -> Tuple[str, Optional[int]]:
     if pd.isna(val) or val is None or val == "":
         return "", None
 
+    # Already a datetime or Timestamp
+    if isinstance(val, (datetime, pd.Timestamp)):
+        return val.strftime("%d/%m/%Y"), val.hour
+
     # Excel serial number handling (e.g., 46321 -> 26/10/2026)
     try:
         num = float(val)
@@ -249,14 +253,25 @@ class SalesDataProcessor:
             "final_total": final_total
         }
 
+    def parse_odoo_excel_file(
+        self,
+        file_path_or_bytes: Any,
+        exclude_old: bool = True
+    ) -> List[Dict[str, Any]]:
+        """
+        Alias & handler for reading uploaded Excel/CSV files in DailySalesApp.
+        Supports both classic Access layouts and modern Odoo table exports.
+        """
+        return self.parse_excel_file(file_path_or_bytes, exclude_old=exclude_old)
+
     def parse_excel_file(
         self,
         file_path_or_bytes: Any,
         exclude_old: bool = True
     ) -> List[Dict[str, Any]]:
         """
-        Reads Excel file (`Pos Closing Daily Sales.xlsx` or `.csv`), applies `qryDailySales` filter:
-        WHERE F1 Between '1' And '999' AND F3 Not In (SELECT closing_no FROM tbl_old).
+        Reads Excel file (`Pos Closing Daily Sales.xlsx`, `.csv`, or Odoo exported Excel),
+        applies `qryDailySales` filter, and returns structured records.
         """
         old_closings = self.get_old_closing_numbers() if exclude_old else set()
 
@@ -266,12 +281,17 @@ class SalesDataProcessor:
         # Handle both CSV and Excel files
         if isinstance(file_path_or_bytes, str) and file_path_or_bytes.endswith(".csv"):
             lines = []
-            with open(file_path_or_bytes, "r", encoding="utf-8-sig") as f:
-                for line in f:
-                    lines.append(line.strip().split(","))
+            try:
+                df_raw = pd.read_csv(file_path_or_bytes, header=None, encoding="utf-8-sig")
+            except Exception:
+                df_raw = pd.read_csv(file_path_or_bytes, header=None, encoding="cp1256")
+            lines = df_raw.values.tolist()
         else:
             df_raw = pd.read_excel(file_path_or_bytes, header=None)
             lines = df_raw.values.tolist()
+
+        if not lines:
+            return []
 
         # Check if the uploaded file is actually an Old Closings export (e.g., qryExportOldDetailed)
         first_row_str = " ".join(str(x).lower() for x in lines[0] if pd.notna(x)) if lines else ""
@@ -282,69 +302,154 @@ class SalesDataProcessor:
                 stats=stats
             )
 
-        # Locate header row containing 'م' and 'الفرع'
+        # Keyword mapping for flexible column detection
+        KEYWORDS = {
+            "seq": ["م", "مسلسل", "seq", "index", "#", "no"],
+            "showroom": ["الفرع", "المعرض", "اسم المعرض", "نقطة البيع", "نقطة بيع", "نقطه البيع", "اسم نقطة البيع", "showroom", "branch", "pos", "config", "config_id"],
+            "closing_no": ["ر.الاقفال", "رقم الاقفال", "رقم الإقفال", "الاقفال", "الإقفال", "الجلسة", "جلسة", "رقم الجلسة", "closing_no", "closingno", "session", "name", "اسم الجلسة"],
+            "date": ["التاريخ", "تاريخ", "تاريخ الإقفال", "تاريخ الاقفال", "تاريخ الجلسة", "date", "stop_at", "closing_date", "date_raw"],
+            "open": ["افتتاح", "افتتاحية", "الافتتاح", "الافتتاحي", "رصيد البداية", "open", "opening", "starting_balance", "cash_register_balance_start"],
+            "returns": ["مردودات", "المردودات", "ج.المردودات", "مرتجع", "المرتجع", "returns", "refund", "refunds"],
+            "tax": ["الضريبة", "ضريبة", "ضريبة القيمة المضافة", "tax", "vat"],
+            "net_sales": ["صافي الدخل", "ص.الدخل", "صافي المبيعات", "ص.المبيعات", "صافي", "net_sales"],
+            "net_total": ["الإجمالي", "الاجمالي", "صافي الإجمالي", "إجمالي المبيعات", "إجمالي", "اجمالي", "net_total", "total_payments_amount", "المبيعات", "total", "gross", "ج.المبيعات"],
+            "credit": ["الشبكة", "شبكة", "مدى", "بطاقة", "بطاقات", "credit", "bank", "network", "card"],
+            "trans": ["تحويل", "التحويل", "حوالة", "الحوالات", "trans", "transfer"],
+            "cash": ["نقد", "النقد", "كاش", "نقدية", "cash", "real_cash", "ending_cash", "cash_register_balance_end_real"],
+            "commissions": ["عمولات", "عمولة", "العمولات", "commissions", "comm"],
+            "expenses": ["مصروفات", "مصاريف", "المصروفات", "المصاريف", "expenses", "exp"],
+            "diff": ["الفرق", "الفارق", "عجز", "عجز/زيادة", "diff", "difference"],
+            "acc_adjustment": ["تعديل محاسبي", "تسوية", "قيود تسوية", "acc_adjustment", "adjustment"],
+        }
+
+        # Locate header row
         header_idx = -1
-        for i, r in enumerate(lines):
-            r_str = [str(x) for x in r if pd.notna(x)]
-            if len(r_str) > 2 and (r_str[0].strip() == "م" or "م" in r_str[0]) and any("الفرع" in s for s in r_str[:3]):
-                header_idx = i
+        col_map: Dict[str, int] = {}
+
+        for row_i, r in enumerate(lines[:20]):
+            matched_fields: Dict[str, int] = {}
+            for col_i, cell in enumerate(r):
+                if pd.isna(cell):
+                    continue
+                cell_s = str(cell).strip().lower()
+                for f_name, kws in KEYWORDS.items():
+                    if f_name not in matched_fields:
+                        for kw in kws:
+                            if kw == cell_s or kw in cell_s:
+                                matched_fields[f_name] = col_i
+                                break
+            has_crit = ("showroom" in matched_fields or "closing_no" in matched_fields) and (
+                "date" in matched_fields or "net_total" in matched_fields or "closing_no" in matched_fields or "showroom" in matched_fields
+            )
+            if len(matched_fields) >= 2 and has_crit:
+                header_idx = row_i
+                col_map = matched_fields
                 break
 
-        if header_idx == -1:
-            # Fallback: header might be on row 7
-            header_idx = 7 if len(lines) > 7 else 0
+        # Fallback or classic Access positional detection
+        use_positional = False
+        if header_idx != -1:
+            h_row_str = [str(x).strip() for x in lines[header_idx] if pd.notna(x)]
+            if len(h_row_str) > 2 and ("م" == h_row_str[0] or "م" in h_row_str[0]) and any("الفرع" in s for s in h_row_str[:3]):
+                use_positional = True
+        else:
+            for i, r in enumerate(lines[:15]):
+                r_str = [str(x).strip() for x in r if pd.notna(x)]
+                if len(r_str) > 2 and ("م" in r_str[0]) and any("الفرع" in s for s in r_str[:3]):
+                    header_idx = i
+                    use_positional = True
+                    break
+            if header_idx == -1:
+                header_idx = 7 if len(lines) > 7 else 0
+                use_positional = True
 
         raw_rows = lines[header_idx + 1:]
         records = []
 
-        for r in raw_rows:
-            if len(r) < 10:
-                continue
-            f1 = str(r[0]).strip() if pd.notna(r[0]) else ""
-            # Filter F1 Between "1" And "999" (ignoring header or summary totals)
-            if not (f1.isdigit() and 1 <= int(f1) <= 999):
+        for row_num, r in enumerate(raw_rows, start=1):
+            if not any(pd.notna(x) for x in r):
                 continue
 
-            raw_desc = str(r[1]).strip() if pd.notna(r[1]) else ""
-            closing_no = str(r[2]).strip() if pd.notna(r[2]) else ""
-
-            # Exclude already approved sessions (matching Access WHERE F3 Not In tblOLD)
-            if exclude_old and closing_no in old_closings:
+            row_text = " ".join(str(x).lower() for x in r if pd.notna(x))
+            if any(term in row_text for term in ["إجمالي عام", "اجمالي عام", "المجموع العام", "grand total", "total:"]):
                 continue
 
-            # Resolve showroom details
+            if use_positional or (not col_map.get("closing_no") and not col_map.get("showroom")):
+                if len(r) < 10:
+                    continue
+                f1 = str(r[0]).strip() if pd.notna(r[0]) else ""
+                if not (f1.isdigit() and 1 <= int(f1) <= 999):
+                    continue
+
+                raw_desc = str(r[1]).strip() if pd.notna(r[1]) else ""
+                closing_no = str(r[2]).strip() if pd.notna(r[2]) else ""
+                date_raw = r[3] if len(r) > 3 else ""
+
+                raw_open = to_float(r[5]) if len(r) > 5 else 0.0
+                raw_returns = to_float(r[6]) if len(r) > 6 else 0.0
+                raw_tax = to_float(r[7]) if len(r) > 7 else 0.0
+                raw_net_sales = to_float(r[8]) if len(r) > 8 else 0.0
+                raw_net_total = to_float(r[9]) if len(r) > 9 else 0.0
+                raw_credit = to_float(r[10]) if len(r) > 10 else 0.0
+                raw_trans = to_float(r[11]) if len(r) > 11 else 0.0
+                raw_cash = to_float(r[12]) if len(r) > 12 else 0.0
+                raw_comm = round(to_float(r[13])) if len(r) > 13 else 0
+                raw_exp = to_float(r[14]) if len(r) > 14 else 0.0
+                raw_diff = to_float(r[15]) if len(r) > 15 else 0.0
+                raw_adj = to_float(r[16]) if len(r) > 16 else 0.0
+                seq_val = int(f1)
+            else:
+                def _get_val(field_name: str, default: Any = "") -> Any:
+                    idx = col_map.get(field_name)
+                    if idx is not None and idx < len(r) and pd.notna(r[idx]):
+                        return r[idx]
+                    return default
+
+                closing_no = str(_get_val("closing_no", "")).strip()
+                raw_desc = str(_get_val("showroom", "")).strip()
+                date_raw = _get_val("date", "")
+
+                if not closing_no and not raw_desc:
+                    continue
+
+                seq_val = _get_val("seq", row_num)
+                try:
+                    seq_val = int(seq_val)
+                except Exception:
+                    seq_val = row_num
+
+                raw_open = to_float(_get_val("open", 0.0))
+                raw_returns = to_float(_get_val("returns", 0.0))
+                raw_tax = to_float(_get_val("tax", 0.0))
+                raw_net_sales = to_float(_get_val("net_sales", 0.0))
+                raw_net_total = to_float(_get_val("net_total", 0.0))
+                raw_credit = to_float(_get_val("credit", 0.0))
+                raw_trans = to_float(_get_val("trans", 0.0))
+                raw_cash = to_float(_get_val("cash", 0.0))
+                raw_comm = round(to_float(_get_val("commissions", 0)))
+                raw_exp = to_float(_get_val("expenses", 0.0))
+                raw_diff = to_float(_get_val("diff", 0.0))
+                raw_adj = to_float(_get_val("acc_adjustment", 0.0))
+
+            if exclude_old and closing_no and closing_no in old_closings:
+                continue
+
             sh = self.resolver.resolve(raw_desc)
             short_name = sh.Short if sh else raw_desc
             city_no = sh.CityNo if sh and sh.CityNo else "999"
             city_name = sh.city.CityName if sh and sh.city else "غير محدد"
             branch_name = sh.city.branch.BranchName if sh and sh.city and sh.city.branch else "عام"
 
-            # Parse date & time
-            date_raw = r[3] if len(r) > 3 else ""
             date_str, closing_hour = parse_date_value(date_raw)
 
-            # Amounts
-            raw_open = to_float(r[5]) if len(r) > 5 else 0.0
-            raw_returns = to_float(r[6]) if len(r) > 6 else 0.0  # Usually negative, e.g. -232.00
-            raw_tax = to_float(r[7]) if len(r) > 7 else 0.0
-            raw_net_sales = to_float(r[8]) if len(r) > 8 else 0.0
-            raw_net_total = to_float(r[9]) if len(r) > 9 else 0.0
-
-            # CRITICAL ACCESS FORMULA: Total (المبيعات) = NetTotal (الإجمالي) + Returns (المردودات)
-            # Example: 3580.90 + (-232.00) = 3348.90
             calculated_total = raw_net_total + raw_returns
-
-            raw_credit = to_float(r[10]) if len(r) > 10 else 0.0
-            raw_trans = to_float(r[11]) if len(r) > 11 else 0.0
-            raw_cash = to_float(r[12]) if len(r) > 12 else 0.0
-            raw_comm = round(to_float(r[13])) if len(r) > 13 else 0  # Rounded to integer
-            raw_exp = to_float(r[14]) if len(r) > 14 else 0.0
-            raw_diff = to_float(r[15]) if len(r) > 15 else 0.0
+            if calculated_total == 0.0 and raw_net_sales != 0.0:
+                calculated_total = raw_net_sales + raw_tax
 
             records.append({
                 "selected": True,
                 "is_old": False,
-                "seq": int(f1),
+                "seq": seq_val,
                 "raw_desc": raw_desc,
                 "showroom": short_name,
                 "city_no": city_no,
@@ -365,10 +470,9 @@ class SalesDataProcessor:
                 "commissions": raw_comm,
                 "expenses": raw_exp,
                 "diff": raw_diff,
-                "acc_adjustment": 0.0,
+                "acc_adjustment": raw_adj,
             })
 
-        # Order BY CityNo ASC, Showroom ASC, date ASC
         records.sort(key=lambda x: (x["city_no"], x["showroom"], x["date"], x["closing_no"]))
         return records
 
@@ -736,3 +840,397 @@ def generate_comparative_excel(comp_data: Dict[str, Any]) -> bytes:
     buf = BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def generate_multidim_excel(multidim_data: Dict[str, Any]) -> bytes:
+    """
+    Generates an executive Excel workbook for Multi-Dimensional reporting
+    (Vendors SG0, Product Categories, and Sub-categories).
+    """
+    import openpyxl
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    from io import BytesIO
+
+    wb = openpyxl.Workbook()
+    ws1 = wb.active
+    ws1.title = "الملخص الرئيسي"
+    ws1.views.sheetView[0].rightToLeft = True
+
+    # Main Title
+    ws1.merge_cells("A1:H1")
+    t_cell = ws1["A1"]
+    t_cell.value = f"{multidim_data.get('title', 'تقرير المبيعات التحليلي')} ({multidim_data.get('start_date')} إلى {multidim_data.get('end_date')})"
+    t_cell.font = Font(name="Calibri", size=14, bold=True, color="115E59")
+    t_cell.alignment = Alignment(horizontal="center", vertical="center")
+    ws1.row_dimensions[1].height = 32
+
+    # Headers
+    prim_label = "المورد" if multidim_data.get("primary_dim") == "vendor" else "نوع البضاعة"
+    headers = ["م", prim_label, "صافي المبيعات (ر.س)", "الضريبة (ر.س)", "الإجمالي (ر.س)", "الكمية المباعة", "عدد الأصناف", "النسبة %"]
+    h_fill = PatternFill(start_color="CCFBF1", end_color="CCFBF1", fill_type="solid")
+    h_font = Font(name="Calibri", size=11, bold=True, color="0F766E")
+    thin_border = Border(
+        left=Side(style="thin", color="CBD5E1"),
+        right=Side(style="thin", color="CBD5E1"),
+        top=Side(style="thin", color="CBD5E1"),
+        bottom=Side(style="thin", color="CBD5E1")
+    )
+
+    ws1.row_dimensions[3].height = 24
+    for idx, h in enumerate(headers, 1):
+        c = ws1.cell(row=3, column=idx, value=h)
+        c.fill = h_fill
+        c.font = h_font
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.border = thin_border
+
+    rows = multidim_data.get("rows", [])
+    has_subrows = any(r.get("sub_rows") for r in rows)
+
+    for i, r in enumerate(rows, 1):
+        r_idx = 3 + i
+        ws1.row_dimensions[r_idx].height = 22
+        ws1.cell(row=r_idx, column=1, value=r.get("seq", i)).border = thin_border
+        ws1.cell(row=r_idx, column=1).alignment = Alignment(horizontal="center", vertical="center")
+
+        c_name = ws1.cell(row=r_idx, column=2, value=r.get("name", ""))
+        c_name.alignment = Alignment(horizontal="right", vertical="center")
+        c_name.font = Font(name="Calibri", size=11, bold=True)
+        c_name.border = thin_border
+
+        for c_pos, k, fmt in [(3, "net", "#,##0.00"), (4, "tax", "#,##0.00"), (5, "gross", "#,##0.00"), (6, "qty", "#,##0.00"), (7, "items_count", "#,##0")]:
+            c = ws1.cell(row=r_idx, column=c_pos, value=r.get(k, 0))
+            c.number_format = fmt
+            c.alignment = Alignment(horizontal="center", vertical="center")
+            c.border = thin_border
+
+        c_pct = ws1.cell(row=r_idx, column=8, value=r.get("share_pct", 0) / 100.0)
+        c_pct.number_format = "0.0%"
+        c_pct.alignment = Alignment(horizontal="center", vertical="center")
+        c_pct.border = thin_border
+
+    # Grand Totals Row
+    gt_row = 4 + len(rows)
+    ws1.row_dimensions[gt_row].height = 25
+    gt = multidim_data.get("grand_totals", {})
+    tot_fill = PatternFill(start_color="F1F5F9", end_color="F1F5F9", fill_type="solid")
+    double_b = Border(
+        left=Side(style="thin", color="94A3B8"),
+        right=Side(style="thin", color="94A3B8"),
+        top=Side(style="thin", color="94A3B8"),
+        bottom=Side(style="double", color="0F172A")
+    )
+
+    c_lbl = ws1.cell(row=gt_row, column=1, value="المجموع")
+    c_lbl.font = Font(name="Calibri", size=11, bold=True)
+    c_lbl.alignment = Alignment(horizontal="center", vertical="center")
+    c_lbl.fill = tot_fill
+    c_lbl.border = double_b
+
+    c_empty = ws1.cell(row=gt_row, column=2, value=f"{len(rows)} مجموعة")
+    c_empty.font = Font(name="Calibri", size=10, bold=True)
+    c_empty.alignment = Alignment(horizontal="center", vertical="center")
+    c_empty.fill = tot_fill
+    c_empty.border = double_b
+
+    for c_pos, k, fmt in [(3, "net", "#,##0.00"), (4, "tax", "#,##0.00"), (5, "gross", "#,##0.00"), (6, "qty", "#,##0.00"), (7, "products_count", "#,##0")]:
+        c = ws1.cell(row=gt_row, column=c_pos, value=gt.get(k, 0))
+        c.number_format = fmt
+        c.font = Font(name="Calibri", size=11, bold=True)
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.fill = tot_fill
+        c.border = double_b
+
+    c_100 = ws1.cell(row=gt_row, column=8, value=1.0)
+    c_100.number_format = "100.0%"
+    c_100.font = Font(name="Calibri", size=11, bold=True)
+    c_100.alignment = Alignment(horizontal="center", vertical="center")
+    c_100.fill = tot_fill
+    c_100.border = double_b
+
+    ws1.column_dimensions["A"].width = 6
+    ws1.column_dimensions["B"].width = 30
+    ws1.column_dimensions["C"].width = 20
+    ws1.column_dimensions["D"].width = 16
+    ws1.column_dimensions["E"].width = 20
+    ws1.column_dimensions["F"].width = 16
+    ws1.column_dimensions["G"].width = 14
+    ws1.column_dimensions["H"].width = 14
+
+    # Sheet 2: Sub-Breakdown if available
+    if has_subrows:
+        ws2 = wb.create_sheet(title="التقسيم التفصيلي الفرعي")
+        ws2.views.sheetView[0].rightToLeft = True
+
+        sec_label = "نوع البضاعة" if multidim_data.get("primary_dim") == "vendor" else "المورد"
+        sub_headers = ["م", prim_label, sec_label, "صافي المبيعات (ر.س)", "الإجمالي (ر.س)", "الكمية", "عدد الأصناف", "النسبة من المجموعة %"]
+
+        ws2.row_dimensions[1].height = 24
+        for idx, h in enumerate(sub_headers, 1):
+            c = ws2.cell(row=1, column=idx, value=h)
+            c.fill = h_fill
+            c.font = h_font
+            c.alignment = Alignment(horizontal="center", vertical="center")
+            c.border = thin_border
+
+        curr_r_idx = 2
+        seq_num = 1
+        for r in rows:
+            p_name = r.get("name", "")
+            for s in r.get("sub_rows", []):
+                ws2.row_dimensions[curr_r_idx].height = 20
+                ws2.cell(row=curr_r_idx, column=1, value=seq_num).border = thin_border
+                ws2.cell(row=curr_r_idx, column=1).alignment = Alignment(horizontal="center", vertical="center")
+
+                c1 = ws2.cell(row=curr_r_idx, column=2, value=p_name)
+                c1.border = thin_border
+                c1.alignment = Alignment(horizontal="right", vertical="center")
+
+                c2 = ws2.cell(row=curr_r_idx, column=3, value=s.get("name", ""))
+                c2.border = thin_border
+                c2.alignment = Alignment(horizontal="right", vertical="center")
+
+                for c_pos, val, fmt in [(4, s.get("net", 0), "#,##0.00"), (5, s.get("gross", 0), "#,##0.00"), (6, s.get("qty", 0), "#,##0.00"), (7, s.get("items_count", 0), "#,##0")]:
+                    c = ws2.cell(row=curr_r_idx, column=c_pos, value=val)
+                    c.number_format = fmt
+                    c.border = thin_border
+                    c.alignment = Alignment(horizontal="center", vertical="center")
+
+                c_share = ws2.cell(row=curr_r_idx, column=8, value=s.get("share_pct", 0) / 100.0)
+                c_share.number_format = "0.0%"
+                c_share.border = thin_border
+                c_share.alignment = Alignment(horizontal="center", vertical="center")
+
+                curr_r_idx += 1
+                seq_num += 1
+
+        ws2.column_dimensions["A"].width = 6
+        ws2.column_dimensions["B"].width = 28
+        ws2.column_dimensions["C"].width = 28
+        ws2.column_dimensions["D"].width = 18
+        ws2.column_dimensions["E"].width = 18
+        ws2.column_dimensions["F"].width = 14
+        ws2.column_dimensions["G"].width = 14
+        ws2.column_dimensions["H"].width = 18
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def generate_showroom_matrix_excel(matrix_data: Dict[str, Any]) -> bytes:
+    """
+    Generates an executive Excel matrix of Showrooms (Rows) × Vendors (Columns) + Totals.
+    """
+    import openpyxl
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    from io import BytesIO
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "مصفوفة المعارض والموردين"
+    ws.views.sheetView[0].rightToLeft = True
+
+    # Title
+    vendors = matrix_data.get("vendor_names", [])
+    tot_cols = len(vendors) + 3
+
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=tot_cols)
+    t = ws.cell(row=1, column=1, value=f"مصفوفة مبيعات المعارض والموردين (صافي المبيعات بالريال السعودي) - للفترة من {matrix_data.get('start_date')} إلى {matrix_data.get('end_date')}")
+    t.font = Font(name="Calibri", size=13, bold=True, color="1E3A8A")
+    t.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 32
+
+    # Headers at row 3
+    h_fill = PatternFill(start_color="DBEAFE", end_color="DBEAFE", fill_type="solid")
+    h_font = Font(name="Calibri", size=10, bold=True, color="1E40AF")
+    thin_border = Border(
+        left=Side(style="thin", color="CBD5E1"),
+        right=Side(style="thin", color="CBD5E1"),
+        top=Side(style="thin", color="CBD5E1"),
+        bottom=Side(style="thin", color="CBD5E1")
+    )
+
+    headers = ["م", "الكود", "المعرض"] + vendors + ["إجمالي المعرض"]
+    ws.row_dimensions[3].height = 24
+    for idx, h in enumerate(headers, 1):
+        c = ws.cell(row=3, column=idx, value=h)
+        c.fill = h_fill
+        c.font = h_font
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.border = thin_border
+
+    rows = matrix_data.get("rows", [])
+    for i, r in enumerate(rows, 1):
+        r_idx = 3 + i
+        ws.row_dimensions[r_idx].height = 20
+        ws.cell(row=r_idx, column=1, value=r.get("seq", i)).border = thin_border
+        ws.cell(row=r_idx, column=1).alignment = Alignment(horizontal="center", vertical="center")
+
+        ws.cell(row=r_idx, column=2, value=r.get("code", "")).border = thin_border
+        ws.cell(row=r_idx, column=2).alignment = Alignment(horizontal="center", vertical="center")
+
+        c_sh = ws.cell(row=r_idx, column=3, value=r.get("showroom", ""))
+        c_sh.font = Font(name="Calibri", size=10, bold=True)
+        c_sh.border = thin_border
+        c_sh.alignment = Alignment(horizontal="right", vertical="center")
+
+        col_pos = 4
+        for v in vendors:
+            v_val = r.get(v, 0.0)
+            c = ws.cell(row=r_idx, column=col_pos, value=v_val)
+            c.number_format = "#,##0.00"
+            c.alignment = Alignment(horizontal="center", vertical="center")
+            c.border = thin_border
+            col_pos += 1
+
+        c_tot = ws.cell(row=r_idx, column=col_pos, value=r.get("total_net", 0.0))
+        c_tot.number_format = "#,##0.00"
+        c_tot.font = Font(name="Calibri", size=10, bold=True, color="1E3A8A")
+        c_tot.alignment = Alignment(horizontal="center", vertical="center")
+        c_tot.border = thin_border
+
+    # Grand Totals Row
+    gt_row = 4 + len(rows)
+    ws.row_dimensions[gt_row].height = 25
+    tot_fill = PatternFill(start_color="F1F5F9", end_color="F1F5F9", fill_type="solid")
+    double_b = Border(
+        left=Side(style="thin", color="94A3B8"),
+        right=Side(style="thin", color="94A3B8"),
+        top=Side(style="thin", color="94A3B8"),
+        bottom=Side(style="double", color="0F172A")
+    )
+
+    c_lbl = ws.cell(row=gt_row, column=1, value="المجموع")
+    c_lbl.font = Font(name="Calibri", size=10, bold=True)
+    c_lbl.alignment = Alignment(horizontal="center", vertical="center")
+    c_lbl.fill = tot_fill
+    c_lbl.border = double_b
+
+    ws.cell(row=gt_row, column=2, value="").border = double_b
+    ws.cell(row=gt_row, column=2).fill = tot_fill
+
+    c_count = ws.cell(row=gt_row, column=3, value=f"{len(rows)} معرض")
+    c_count.font = Font(name="Calibri", size=10, bold=True)
+    c_count.alignment = Alignment(horizontal="center", vertical="center")
+    c_count.fill = tot_fill
+    c_count.border = double_b
+
+    v_totals = matrix_data.get("vendor_totals", {})
+    col_pos = 4
+    for v in vendors:
+        c = ws.cell(row=gt_row, column=col_pos, value=v_totals.get(v, 0.0))
+        c.number_format = "#,##0.00"
+        c.font = Font(name="Calibri", size=10, bold=True)
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.fill = tot_fill
+        c.border = double_b
+        col_pos += 1
+
+    c_grand = ws.cell(row=gt_row, column=col_pos, value=matrix_data.get("grand_total_net", 0.0))
+    c_grand.number_format = "#,##0.00"
+    c_grand.font = Font(name="Calibri", size=11, bold=True, color="1E3A8A")
+    c_grand.alignment = Alignment(horizontal="center", vertical="center")
+    c_grand.fill = tot_fill
+    c_grand.border = double_b
+
+    ws.column_dimensions["A"].width = 5
+    ws.column_dimensions["B"].width = 8
+    ws.column_dimensions["C"].width = 24
+    for i in range(4, tot_cols + 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = 18
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def generate_pareto_excel(pareto_data: Dict[str, Any]) -> bytes:
+    """
+    Generates an executive Excel workbook for Pareto ABC Analysis.
+    """
+    import openpyxl
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    from io import BytesIO
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "تحليل باريتو ABC"
+    ws.views.sheetView[0].rightToLeft = True
+
+    # Title
+    ws.merge_cells("A1:G1")
+    t = ws["A1"]
+    t.value = f"تحليل باريتو والتركيز المالي (Pareto ABC Analysis) - الفترة {pareto_data.get('start_date')} إلى {pareto_data.get('end_date')}"
+    t.font = Font(name="Calibri", size=14, bold=True, color="1E293B")
+    t.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 32
+
+    # Headers
+    headers = ["م", "الصنف / المورد / التصنيف", "المورد (SG0)", "نوع البضاعة", "المبيعات الصافية (ر.س)", "النسبة التراكمية %", "تصنيف باريتو"]
+    h_fill = PatternFill(start_color="E2E8F0", end_color="E2E8F0", fill_type="solid")
+    h_font = Font(name="Calibri", size=11, bold=True, color="0F172A")
+    thin_border = Border(
+        left=Side(style="thin", color="CBD5E1"),
+        right=Side(style="thin", color="CBD5E1"),
+        top=Side(style="thin", color="CBD5E1"),
+        bottom=Side(style="thin", color="CBD5E1")
+    )
+
+    ws.row_dimensions[3].height = 24
+    for idx, h in enumerate(headers, 1):
+        c = ws.cell(row=3, column=idx, value=h)
+        c.fill = h_fill
+        c.font = h_font
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.border = thin_border
+
+    fill_a = PatternFill(start_color="DCFCE7", end_color="DCFCE7", fill_type="solid") # green
+    fill_b = PatternFill(start_color="DBEAFE", end_color="DBEAFE", fill_type="solid") # blue
+    fill_c = PatternFill(start_color="F1F5F9", end_color="F1F5F9", fill_type="solid") # gray
+
+    items = pareto_data.get("items", [])
+    for i, it in enumerate(items, 1):
+        r_idx = 3 + i
+        ws.row_dimensions[r_idx].height = 20
+        ws.cell(row=r_idx, column=1, value=it.get("seq", i)).border = thin_border
+        ws.cell(row=r_idx, column=1).alignment = Alignment(horizontal="center", vertical="center")
+
+        ws.cell(row=r_idx, column=2, value=it.get("name", "")).border = thin_border
+        ws.cell(row=r_idx, column=3, value=it.get("vendor", "")).border = thin_border
+        ws.cell(row=r_idx, column=4, value=it.get("category", "")).border = thin_border
+
+        c_net = ws.cell(row=r_idx, column=5, value=it.get("net", 0.0))
+        c_net.number_format = "#,##0.00"
+        c_net.alignment = Alignment(horizontal="center", vertical="center")
+        c_net.border = thin_border
+
+        c_cum = ws.cell(row=r_idx, column=6, value=it.get("cum_pct", 0.0) / 100.0)
+        c_cum.number_format = "0.0%"
+        c_cum.alignment = Alignment(horizontal="center", vertical="center")
+        c_cum.border = thin_border
+
+        abc = it.get("abc_class", "C")
+        c_abc = ws.cell(row=r_idx, column=7, value=f"فئة {abc} ({it.get('class_desc', '')})")
+        c_abc.alignment = Alignment(horizontal="center", vertical="center")
+        c_abc.font = Font(name="Calibri", size=10, bold=True)
+        c_abc.border = thin_border
+        if abc == "A":
+            c_abc.fill = fill_a
+        elif abc == "B":
+            c_abc.fill = fill_b
+        else:
+            c_abc.fill = fill_c
+
+    ws.column_dimensions["A"].width = 6
+    ws.column_dimensions["B"].width = 34
+    ws.column_dimensions["C"].width = 24
+    ws.column_dimensions["D"].width = 24
+    ws.column_dimensions["E"].width = 20
+    ws.column_dimensions["F"].width = 18
+    ws.column_dimensions["G"].width = 24
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
