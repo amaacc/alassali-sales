@@ -1338,9 +1338,9 @@ with tab_monthly:
         with md_col4:
             # Showroom filter
             db_m = SessionLocal()
-            sh_list = db_m.query(Showroom).filter(Showroom.Active == True).order_by(Showroom.Code).all()
+            sh_list = db_m.query(Showroom).filter(Showroom.is_active == True).order_by(Showroom.No.asc()).all()
             db_m.close()
-            sh_options = ["🏢 كافة معارض الشركة (إجمالي)"] + [f"{s.Code} - {s.Name}" for s in sh_list]
+            sh_options = ["🏢 كافة معارض الشركة (إجمالي)"] + [f"{s.No} - {s.Short}" for s in sh_list]
             sh_selected = st.selectbox("تصفية حسب المعرض:", sh_options, key="md_sh_filter")
             sh_cfg_id = None
             if sh_selected != "🏢 كافة معارض الشركة (إجمالي)":
