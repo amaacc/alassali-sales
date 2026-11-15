@@ -23,10 +23,18 @@ from database import (
     SessionLocal, init_db, Branch, City, Showroom, OldClosing, ReportBatch,
     get_database_status_info
 )
+import importlib
+import processor
+try:
+    importlib.reload(processor)
+except Exception:
+    pass
+
 from processor import (
     SalesDataProcessor, parse_date_value, OldClosingsFileUploadedError,
     generate_monthly_excel, generate_periodic_excel, generate_comparative_excel,
-    generate_multidim_excel, generate_showroom_matrix_excel, generate_pareto_excel
+    generate_multidim_excel, generate_showroom_matrix_excel, generate_pareto_excel,
+    ShowroomResolver
 )
 from pdf_generator import PDFReportGenerator
 from odoo_client import OdooClient
@@ -1525,7 +1533,6 @@ with tab_monthly:
                 try:
                     c_mx = OdooClient()
                     db_resolver = SessionLocal()
-                    from processor import ShowroomResolver, ShowroomMappingResolver
                     res_resolver = ShowroomResolver(db_resolver)
                     mx_res = c_mx.fetch_showroom_vendor_matrix(
                         start_date=mx_d1.strftime("%Y-%m-%d"),
