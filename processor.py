@@ -134,6 +134,9 @@ class ShowroomResolver:
         return None
 
 
+ShowroomMappingResolver = ShowroomResolver
+
+
 def to_float(val: Any) -> float:
     """Safe float conversion."""
     if val is None or pd.isna(val) or val == "":

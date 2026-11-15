@@ -1525,8 +1525,8 @@ with tab_monthly:
                 try:
                     c_mx = OdooClient()
                     db_resolver = SessionLocal()
-                    from processor import ShowroomMappingResolver
-                    res_resolver = ShowroomMappingResolver(db_resolver)
+                    from processor import ShowroomResolver, ShowroomMappingResolver
+                    res_resolver = ShowroomResolver(db_resolver)
                     mx_res = c_mx.fetch_showroom_vendor_matrix(
                         start_date=mx_d1.strftime("%Y-%m-%d"),
                         end_date=mx_d2.strftime("%Y-%m-%d"),
