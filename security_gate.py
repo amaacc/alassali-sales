@@ -14,7 +14,7 @@ import streamlit as st
 # Ensure root directory is accessible for licensing import
 root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if root_dir not in sys.path:
-    sys.path.insert(0, root_dir)
+    sys.path.append(root_dir)
 
 try:
     from licensing import (
