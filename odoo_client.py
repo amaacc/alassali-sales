@@ -41,12 +41,16 @@ def get_xmlrpc_transport(url: str, timeout: float = 25.0):
         return SafeTimeoutTransport(timeout=timeout)
     return RegularTimeoutTransport(timeout=timeout)
 
-# Optional fallback to root security.py credentials if available
+# Optional fallback to root/app security credentials if available
 try:
     import sys
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from security import get_odoo_credentials
+    app_dir = os.path.dirname(os.path.abspath(__file__))
+    if app_dir not in sys.path:
+        sys.path.insert(0, app_dir)
+    try:
+        from app_security import get_odoo_credentials
+    except Exception:
+        from security import get_odoo_credentials
 except Exception:
     get_odoo_credentials = None
 

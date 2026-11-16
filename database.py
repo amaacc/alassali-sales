@@ -261,7 +261,10 @@ if not _raw_db_url:
 # Fallback: Securely decrypted Supabase Cloud Database URL (resilient on Streamlit Cloud & local)
 if not _raw_db_url:
     try:
-        from security import get_database_credentials
+        try:
+            from app_security import get_database_credentials
+        except Exception:
+            from security import get_database_credentials
         _raw_db_url = get_database_credentials()
     except Exception as e:
         print(f"[Database] Decryption fallback warning: {e}")
